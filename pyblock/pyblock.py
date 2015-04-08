@@ -44,7 +44,8 @@ Lang, T. J., S. W. Nesbitt, and L. D. Carey, 2009: On the correction of
 
 Dependencies
 ------------
-numpy, pyart, csu_radartools, dualpol, warnings, os, __future__, matplotlib, gzip
+numpy, pyart, csu_radartools, dualpol, warnings, os, __future__, matplotlib, 
+statsmodels, gzip
 
 
 Change Log
@@ -62,13 +63,14 @@ from __future__ import division
 import numpy as np
 import matplotlib.pyplot as plt
 from warnings import warn
+import statsmodels.api as sm
 import os
 import gzip
 import pickle
 import pyart
 import dualpol
 from csu_radartools import csu_misc
-from singledop import fn_timer #Remove before releasing
+from singledop import fn_timer #Remove before releasing?
 
 VERSION = '0.1'
 DATA_DIR = os.sep.join([os.path.dirname(__file__), 'data'])+'/'
@@ -81,8 +83,12 @@ BAD = -32768
 DEFAULT_SDP = 12
 DEFAULT_BINS = 1.0
 DEFAULT_ZH_UNCERTAINTY = 1.0
+DEFAULT_ZDR_UNCERTAINTY = 0.1
 XTICKS = [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360]
 STATS_KEYS = ['N', 'low', 'median', 'high']
+DEFAULT_DOMAIN = [-20, 60]
+DEFAULT_ZMAX = 55
+DEFAULT_DELZ = 1.0
 
 #####################################
 
@@ -95,7 +101,8 @@ DEFAULT_KW = {'sweep': 0, 'dz': 'ZH', 'dr': 'DR', 'dp': 'DP', 'rh': 'RH',
           'vr': 'VR', 'magnetron': False, 'bin_width': DEFAULT_BINS,
           'rain_kdp_thresh': DEFAULT_RAIN, 'drizzle_kdp_thresh': DEFAULT_DRIZZ,
           'rng_thresh': DEFAULT_RANGE, 'dsd_flag': False, 'output': 100,
-          'rain_dz_thresh': 39, 'liquid_ice_flag': False, 'precip_flag': False}
+          'rain_dz_thresh': 39, 'liquid_ice_flag': False, 'precip_flag': False,
+          'maxZ': DEFAULT_ZMAX}
 
 kwargs = np.copy(DEFAULT_KW)
 
@@ -143,6 +150,7 @@ rain_dz_thresh = Reflectivity threshold below which data will not be used
                  exceeds rain_dp_thresh
 liquid_ice_flag = Set to True to also retrieve liquid/ice mass via DualPol
 precip_flag = Set to True to also retrieve rainfall rate via DualPol
+maxZ = Integer, highest Z value to consider in FSC method (to avoid ice contam.)
 
 """
 
@@ -176,6 +184,7 @@ class BeamBlockSingleVolume(object):
         try:
             radar = pyart.io.read(filename)
             self.sweep = kwargs['sweep']
+            self.maxZ = np.int32(kwargs['maxZ'])
             self.rain_total_pts = 0
             self.drizz_total_pts = 0
             self.radar = radar.extract_sweeps([self.sweep])
@@ -276,13 +285,13 @@ class BeamBlockSingleVolume(object):
              self.drizzle_not_dz])
     
     def partition_fsc_data(self):
-        """Consilidate and invert the bad masks, then add more good masks."""
+        """Consolidate and invert the bad masks, then add more good masks."""
         self.fsc_not_fhc = np.logical_and(self.fhc != 1, self.fhc != 2)
         self.fsc_good_mask = consolidate_masks([self.bad_data_mask,
                              self.range_mask, self.fsc_not_fhc])
-        self.kd_mask = self.kd > 0 #Won't examine neg. Kdp regions
+        self.kd_mask = self.kd > -100
         self.dr_mask = self.dr > -100
-        self.dz_mask = self.dz > -100
+        self.dz_mask = np.logical_and(self.dz > -100, self.dz < self.maxZ)
         cond = np.logical_and(self.kd_mask, self.dr_mask)
         cond = np.logical_and(self.dz_mask, cond)
         self.fsc_good_mask = np.logical_and(self.fsc_good_mask, cond)
@@ -472,9 +481,9 @@ class BeamBlockMultiVolume(BlockStats):
                   os.path.basename(self.sounding_list[i])
             self.kwargs['sounding'] = self.sounding_list[i]
             bb = BeamBlockSingleVolume(filen, **self.kwargs)
-            if not hasattr(bb, 'Fail'):
+            if not hasattr(bb, 'Fail'): #This avoids crashing on a bum file
                 #Initialize dicts
-                if i == 0:
+                if i == 0 or not hasattr(self, 'rain_total_pts'):
                     self.initialize_data_lists(bb)
                 #Keep track of total points from each file
                 self.rain_total_pts += bb.rain_total_pts
@@ -633,6 +642,8 @@ class BeamBlockMultiVolume(BlockStats):
                 sndlist = sounding
         self.sounding_list = sndlist
 
+    #Check that different bin size than 1.0 dB works OK with indices, etc.
+
 #####################################
 
 class RawDataStorage(object):
@@ -751,66 +762,85 @@ class KdpMethodAnalysis(BlockStats, MaskHelper):
 
     def calc_blockage_correction(self):
         self.length = len(self.blocked_azimuths)
-        self.calc_zh_correction()
-        self.calc_zdr_correction()
-        
-    def calc_zh_correction(self):
-        """
-        Calculate the suggested reflectivity corrections. There are currently 
-        three approaches, which will tend to agree in well-behaved data (i.e.,
-        confidence intervals are narrow). In data with wide confidence intervals,
-        some corrections may not end up being suggested due to lack of certainty.
-        standard: Difference between median reflectivity in blocked azimuth
-                  and median of unblocked azimuths is > 1 dBZ (default) and
-                  the difference is greater than half the 95% confidence interval
-                  at that azimuth.
-        loose: standard conditions apply plus the difference between the high 
-               value in the 95% interval at the blocked azimuth and the median in
-               unblocked azimuths is still greater than half the unblocked
-               confidence interval.
-        strict: Difference between median reflectivity in blocked azimuth                     
-                and median of unblocked azimuths is > 1 dBZ (default) and the 
-                difference is greater than the the difference between the high 
-                value in the 95% interval at the blocked azimuth and the median 
-                in unblocked azimuths.
-        """
-        self.suggested_zh_corrections = {}
-        self.suggested_zh_corrections['azimuth'] = self.blocked_azimuths
-        self.suggested_zh_corrections['standard'] = np.zeros(self.length)
-        self.suggested_zh_corrections['strict'] = np.zeros(self.length)
-        self.suggested_zh_corrections['loose'] = np.zeros(self.length)
-        self.zh_difference = self.blocked_rain_stats['median'] - self.rain_median
-        self.zh_conf_bl = self.blocked_rain_stats['high'] - \
-                          self.blocked_rain_stats['low']
-        self.zh_diff_ci_hi = self.blocked_rain_stats['high'] - self.rain_median
-        self.zh_conf_unbl = np.max(self.unblocked_rain_stats['high'] - \
-                                   self.unblocked_rain_stats['low'])
-        for i, az in enumerate(self.blocked_azimuths):
-            if self.zh_difference[i] <= -1.0 * DEFAULT_ZH_UNCERTAINTY:
-                if np.abs(self.zh_difference[i]) > 0.5 * self.zh_conf_bl[i]:
-                    self.suggested_zh_corrections['standard'][i] = \
-                           -1.0 * self.zh_difference[i]
-                    if np.abs(self.zh_diff_ci_hi[i]) > 0.5 * self.zh_conf_unbl:
-                        self.suggested_zh_corrections['loose'][i] = \
-                                -1.0 * self.zh_difference[i]
-                if np.abs(self.zh_difference[i]) > np.abs(self.zh_diff_ci_hi[i]):
-                   self.suggested_zh_corrections['strict'][i] = \
-                           -1.0 * self.zh_difference[i]
-            print az, ["%.2f" % np.round(self.suggested_zh_corrections[key][i],
-                       decimals=2) for key in
-                       self.suggested_zh_corrections.keys() if not
-                       key == 'azimuth']
-    
-    def calc_zdr_correction(self):
-        self.suggested_zdr_corrections = {}
-        self.suggested_zdr_corrections['azimuth'] = self.blocked_azimuths
-        self.zdr_difference = self.drizz_median - \
-                              self.blocked_drizz_stats['median']
+        self.zh_adjustments = Corrections(self, True)
+        self.zdr_adjustments = Corrections(self, False)
 
-    #Methods to determine ZDR deviation beyond confidence interval and
-    #incorporate that into blockage estimation
+    #Check ZDR corrections against IDL version
     #Test w/ previously determined statistics from IDL programs -
     #interface class?
+
+#####################################
+
+class Corrections(object):
+
+    """
+    Calculate the suggested reflectivity/ZDR corrections. There are currently
+    three approaches, which will tend to agree in well-behaved data (i.e.,
+    confidence intervals are narrow). In data with wide confidence intervals,
+    some corrections may not end up being suggested due to lack of certainty.
+    standard: Difference between median reflectivity/ZDR in blocked azimuth
+              and median of unblocked azimuths is > 1 dBZ or 0.1 dB (default) and
+              the difference is greater than half the 95% confidence interval
+              at that azimuth.
+    loose: standard conditions apply plus the difference between the high
+            value in the 95% interval at the blocked azimuth and the median in
+            unblocked azimuths is still greater than half the unblocked
+            confidence interval.
+    strict: Difference between median reflectivity/ZDR in blocked azimuth
+            and median of unblocked azimuths is > 1 dBZ or 0.1 dB (default) and the
+            difference is greater than the the difference between the high
+            value in the 95% interval at the blocked azimuth and the median
+            in unblocked azimuths.
+    """
+
+    def __init__(self, kdp_analysis, zh_flag=True, verbose=False):
+        self.blocked_azimuths = kdp_analysis.blocked_azimuths
+        self.length = kdp_analysis.length
+        self._check_var(kdp_analysis, zh_flag, verbose)
+        self.suggested_corrections = {}
+        self.suggested_corrections['azimuth'] = self.blocked_azimuths
+        for key in ['standard', 'strict', 'loose']:
+            self.suggested_corrections[key] = np.zeros(self.length)
+        self.determine_differences()
+        self.determine_corrections(verbose=verbose)
+ 
+    def determine_differences(self):
+        self.difference = self.blocked_stats['median'] - self.median
+        self.conf_bl = self.blocked_stats['high'] - self.blocked_stats['low']
+        self.diff_ci_hi = self.blocked_stats['high'] - self.median
+        self.conf_unbl = np.max(self.unblocked_stats['high'] - \
+                                self.unblocked_stats['low'])
+
+    def determine_corrections(self, verbose=False):
+        for i, az in enumerate(self.blocked_azimuths):
+            if self.difference[i] <= -1.0 * self.uncertainty:
+                if np.abs(self.difference[i]) > 0.5 * self.conf_bl[i]:
+                    self.suggested_corrections['standard'][i] = \
+                           -1.0 * self.difference[i]
+                    if np.abs(self.diff_ci_hi[i]) > 0.5 * self.conf_unbl:
+                        self.suggested_corrections['loose'][i] = \
+                                -1.0 * self.difference[i]
+                if np.abs(self.difference[i]) > np.abs(self.diff_ci_hi[i]):
+                    self.suggested_corrections['strict'][i] = \
+                           -1.0 * self.difference[i]
+            if verbose:
+                print az, ["%.2f" % np.round(self.suggested_corrections[key][i],
+                           decimals=2) for key in self.suggested_corrections.keys()
+                           if not key == 'azimuth']
+
+    def _check_var(self, kdp_analysis, zh_flag, verbose):
+        if zh_flag:
+            self.blocked_stats = kdp_analysis.blocked_rain_stats
+            self.unblocked_stats = kdp_analysis.unblocked_rain_stats
+            self.median = kdp_analysis.rain_median
+            self.uncertainty = DEFAULT_ZH_UNCERTAINTY
+        else:
+            self.blocked_stats = kdp_analysis.blocked_drizz_stats
+            self.unblocked_stats = kdp_analysis.unblocked_drizz_stats
+            self.median = kdp_analysis.drizz_median
+            self.uncertainty = DEFAULT_ZDR_UNCERTAINTY
+
+    #Fix treatment of -32768s
 
 #####################################
 
@@ -822,27 +852,107 @@ class SelfConsistentAnalysis(MaskHelper):
     reference for this technique is Giangrande and Ryzhkov (2005).
     """
 
-    def __init__(self, filename):
-        data = RawDataStorage(filename=filename)
-        self.fsc_data = data.fsc_data
-        self.Azimuth = data.Azimuth
-
-    def regress_unblocked_data(self, azimuths=[(0,360)]):
+    def __init__(self, filename, azimuths=[(0,360)]):
         """
-        azimuths = list of tuples, each containing a span of unblocked azimuths
+        filename = Name of RawStorageData file
+        azimuths = List of tuples, each containing a span of unblocked azimuths
                    to consider in the determination of the rainfall 
                    self-consistency relationship between Z, Zdr, and Kdp.
         """
+        data = RawDataStorage(filename=filename)
+        self.fsc_data = data.fsc_data
+        self.Azimuth = data.Azimuth
         self.get_azimuth_mask(azimuths)
-        self.azimuth_indices = np.int32(np.arange(len(self.Azimuth)))
         self.unblocked_azimuths = self.Azimuth[self.azimuth_mask]
+        self.blocked_azimuths = self.Azimuth[~self.azimuth_mask]
+        self.azimuth_indices = np.int32(np.arange(len(self.Azimuth)))
         self.unblocked_azimuth_indices = self.azimuth_indices[self.azimuth_mask]
-        self.populate_unblocked_data()
-        logKdp = np.log10(self.unblocked_data['KD'])
-        self.beta_hat = multiple_linear_regression(self.unblocked_data['DZ'],
-                        [logKdp, self.unblocked_data['DR']])
+        self.blocked_azimuth_indices = self.azimuth_indices[~self.azimuth_mask]
+        self.zh_range = np.int32(np.arange(DEFAULT_ZMAX))
 
-    def populate_unblocked_data(self):
+    def regress_unblocked_medians(self, zmin=0):
+        """
+        Performs multiple linear regression to obtain coefficients for line:
+        Zestimate = b * log10(Kdp) + c * Zdr + a (cf. Eq. 1, Lang et al., 2009).
+        This is done using median values for unblocked data, with Zh being
+        binned up and Kdp and Zdr medians within each bin being determined.
+        
+        zmin = Minimum Zh value to consider in regression. We control for
+               Kdp <= 0 but just in case it is still noisy in low Zh, you
+               can use zmin to filter that out.
+        
+        Key output
+        ----------
+        self.beta_hat = list of coefficients for above eq. (order = [b, c, a])
+        """
+        self._populate_unblocked_data()
+        self._get_medians()
+        self._get_weights()
+        mask = np.logical_and(self.unblocked_medians['KD'] > 0,
+                              self.unblocked_medians['DR'] > -900)
+        mask = np.logical_and(mask, self.unblocked_medians['DZ'] > zmin)
+        self.logKdp = np.log10(self.unblocked_medians['KD'])
+        self.beta_hat = \
+             multiple_linear_regression(self.unblocked_medians['DZ'][mask],
+                        [self.logKdp[mask], self.unblocked_medians['DR'][mask]])
+        self.b = self.beta_hat[0]
+        self.c = self.beta_hat[1]
+        self.a = self.beta_hat[2]
+ 
+    def plot_histogram_unblocked(self, save=None, domain=DEFAULT_DOMAIN,
+                                 zmin=None):
+        """
+        Plots a simple 2-D histogram for visualizing the results and performance
+        of the regress_unblocked_data() method.
+        
+        Keywords
+        --------
+        save = Name of image file to save figure to.
+        domain = 2-element tuple to narrow down the display range of histogram.
+        """
+        if not hasattr(self, 'beta_hat') or zmin is not None:
+            if zmin is None:
+                zmin = 0
+            self.regress_unblocked_medians(zmin=zmin)
+        data = linear_calc(self.beta_hat, [np.log10(self.unblocked_data['KD']),
+                                           self.unblocked_data['DR']])
+        lim = DEFAULT_DOMAIN
+        fig = plt.figure(figsize=(6,5))
+        hist = plt.hist2d(data, self.unblocked_data['DZ'], bins=80,
+                          cmap='Blues', range=[lim, lim], cmin=1)
+        plt.plot(domain, domain, 'r--', lw=2)
+        plt.xlim(domain)
+        plt.ylim(domain)
+        plt.xlabel('Predicted DZ (dBZ)')
+        plt.ylabel('Actual DZ (dBZ)')
+        plt.colorbar(label='Number of points')
+        if save is not None:
+            plt.savefig(save)
+
+    def compute_I1_and_I2(self):
+        """
+        Compute the I1 and I2 integrals from Eq. 2-3 in Lang et al. (2009).
+        """
+        if not hasattr(self, 'beta_hat'):
+            self.regress_unblocked_medians()
+        self.I1 = {}
+        self.I2 = {}
+        self.expected_zdr = {}
+        self.expected_kdp = {}
+        self.number_of_obs = {}
+        for i, index in enumerate(self.blocked_azimuth_indices):
+            key = str(index)
+            self._get_expected_vals(key)
+            self.I1[key] = np.dot(self.expected_kdp[key],
+                                  DEFAULT_DELZ*self.number_of_obs[key])
+            self._compute_I2(key)
+
+    def _populate_unblocked_data(self):
+        """
+        Populates the unblocked data dictionary by consolidating all data from
+        unblocked azimuths. Performs a simple test to make sure there is no 
+        weirdness in terms of data structure.
+        """
         self.unblocked_data = {}
         self.unblocked_data['DZ'] = []
         self.unblocked_data['DR'] = []
@@ -863,7 +973,52 @@ class SelfConsistentAnalysis(MaskHelper):
                    str(self.unblocked_data['KD'])
             warn('DZ DR KD not equal length, going to #FAIL: ' + wstr)
 
+    def _get_medians(self):
+        self.unblocked_medians = {}
+        self.unblocked_medians['DZ'] = self.zh_range + 0.5
+        self.unblocked_medians['KD'] = np.zeros(len(self.zh_range)) - 999.0
+        self.unblocked_medians['DR'] = np.zeros(len(self.zh_range)) - 999.0
+        self.unblocked_medians['N'] = np.zeros(len(self.zh_range))
+        indices = np.int32(np.floor(self.unblocked_data['DZ']))
+        for index in self.zh_range:
+            mask = indices == index
+            self.unblocked_medians['N'][index] = \
+                 np.size(self.unblocked_data['DZ'][mask])
+            if self.unblocked_medians['N'][index] > 1:
+                self.unblocked_medians['KD'][index] = \
+                               np.median(self.unblocked_data['KD'][mask])
+                self.unblocked_medians['DR'][index] = \
+                               np.median(self.unblocked_data['DR'][mask])
+
+    def _get_weights(self):
+        self.weights = self.unblocked_medians['N'] * self.unblocked_medians['KD']
+        self.weights = self.weights / self.weights.sum()
+
+    def _compute_I2(self, key):
+        exponent = (-1.0*self.a + 1.0*self.zh_range - \
+                    self.c*self.expected_zdr[key]) / self.b
+        power = 10.0**exponent
+        self.I2[key] = np.dot(power, DEFAULT_DELZ*self.number_of_obs[key])
+
+    def _get_expected_vals(self, key):
+        tmp_dz = np.array(self.fsc_data['DZ'][key])
+        tmp_kd = np.array(self.fsc_data['KD'][key])
+        tmp_dr = np.array(self.fsc_data['DR'][key])
+        self.expected_zdr[key] = np.zeros(DEFAULT_ZMAX)
+        self.expected_kdp[key] = np.zeros(DEFAULT_ZMAX)
+        self.number_of_obs[key] = np.zeros(DEFAULT_ZMAX)
+        dz_int = np.int32(np.rint(tmp_dz))
+        for index in self.zh_range:
+            mask = dz_int == index
+            self.number_of_obs[key][index] = len(tmp_dr[mask])
+            if self.number_of_obs[key][index] > 1:
+                self.expected_zdr[key][index] = np.median(tmp_dr[mask])
+                self.expected_kdp[key][index] = np.median(tmp_kd[mask])
+
     #Methods to do integrations and compare them to determine blockage
+    #Check that integrations are actually working - use NAME data?
+    #Method to determine/apply ZDR corrections
+    #Method to derive ZDR depression based on <ZDR(Z=0)>?
 
 #####################################
 
@@ -919,12 +1074,39 @@ def calc_median_ci(array):
         return Nint, BAD, BAD, BAD
 
 @fn_timer
-def multiple_linear_regression(independent_var, dependent_vars):
-    y = independent_var
-    x = dependent_vars
+def multiple_linear_regression(dependent_var, independent_vars):
+    """
+    Simple unweighted least-squares multiple linear regression using 
+    numpy.linalg module.
+    """
+    y = dependent_var
+    x = independent_vars
     X = np.column_stack(x+[[1]*len(x[0])])
     beta_hat = np.linalg.lstsq(X,y)[0]
     return beta_hat
+
+@fn_timer
+def weighted_multiple_linear_regression(dependent_var, independent_vars,
+                                    weights):
+    """
+    Simple weighted least-squares multiple linear regression using
+    statsmodel module.
+    """
+    Y = dependent_var
+    x = independent_vars
+    X = np.column_stack(x+[[1]*len(x[0])])
+    wls_model = sm.WLS(Y, X, weights=fsc.weights[mask])
+    results = wls_model.fit()
+    return results.params
+
+def linear_calc(coef, independent_vars):
+    """
+    Use np.dot() to quickly evaluate a linear expression to recover the
+    dependent variable from any number of independent variables.
+    """
+    x = independent_vars
+    X = np.column_stack(x+[[1]*len(x[0])])
+    return np.dot(X, coef)
 
 #####################################
 
