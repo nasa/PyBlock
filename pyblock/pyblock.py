@@ -893,8 +893,9 @@ class SelfConsistentAnalysis(MaskHelper):
         mask = np.logical_and(mask, self.unblocked_medians['DZ'] > zmin)
         self.logKdp = np.log10(self.unblocked_medians['KD'])
         self.beta_hat = \
-             multiple_linear_regression(self.unblocked_medians['DZ'][mask],
-                        [self.logKdp[mask], self.unblocked_medians['DR'][mask]])
+           weighted_multiple_linear_regression(self.unblocked_medians['DZ'][mask],
+           [self.logKdp[mask], self.unblocked_medians['DR'][mask]],
+           self.weights[mask])
         self.b = self.beta_hat[0]
         self.c = self.beta_hat[1]
         self.a = self.beta_hat[2]
@@ -1095,7 +1096,7 @@ def weighted_multiple_linear_regression(dependent_var, independent_vars,
     Y = dependent_var
     x = independent_vars
     X = np.column_stack(x+[[1]*len(x[0])])
-    wls_model = sm.WLS(Y, X, weights=fsc.weights[mask])
+    wls_model = sm.WLS(Y, X, weights=weights)
     results = wls_model.fit()
     return results.params
 
