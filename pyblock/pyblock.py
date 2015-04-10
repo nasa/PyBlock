@@ -1,5 +1,5 @@
 """
-Polarimetric Radar Beam Blockage Calculation
+Python Polarimetric Radar Beam Blockage Calculation
 PyBlock v1.0
 
 
@@ -29,7 +29,7 @@ program expects and how you might change those parameters.
 
 Last Updated
 ------------
-v1.0 - 03/23/2015
+v1.0 - 04/08/2015
 
 
 References
@@ -50,13 +50,16 @@ statsmodels, gzip
 
 Change Log
 ----------
-v1.0 Functionality (03/23/2015)
+v1.0 Functionality (04/08/2015)
 1. Will compute beam blockage for any arbitrary set of polarimetric radar volumes
    via the KDP method of Lang et al. (2009). These results can be saved to file,
    turned into statistics, and plotted.
 2. Compares KDP method's Zh and Zdr data inside and outside of blocked regions,
    in order to help with the derivation of corrections that need to be applied.
-3. Collates data relevant for calculating blockage via the FSC method.
+3. Collates data relevant for calculating blockage via the FSC method. Fits 
+   multiple-linear regression to determine self-consistency relationship and does 
+   rainfall integration comparisons to estimate beam blockage.
+
 
 """
 from __future__ import division
@@ -70,9 +73,8 @@ import pickle
 import pyart
 import dualpol
 from csu_radartools import csu_misc
-from singledop import fn_timer #Remove before releasing?
 
-VERSION = '0.1'
+VERSION = '1.0'
 DATA_DIR = os.sep.join([os.path.dirname(__file__), 'data'])+'/'
 DEFAULT_SND = DATA_DIR + 'default_sounding.txt'
 RANGE_MULT = 1000.0 #m per km
@@ -89,6 +91,8 @@ STATS_KEYS = ['N', 'low', 'median', 'high']
 DEFAULT_DOMAIN = [-20, 60]
 DEFAULT_ZMAX = 55
 DEFAULT_DELZ = 1.0
+DEFAULT_DELK = 0.1 #Resolution (dBZ) of I2 integrations (FSC)
+DEFAULT_KMAX = 350 #Multiply by delk to get maximum block considered by FSC
 
 #####################################
 
@@ -936,6 +940,12 @@ class SelfConsistentAnalysis(MaskHelper):
         """
         if not hasattr(self, 'beta_hat'):
             self.regress_unblocked_medians()
+        #Currently set to check up to a block maximum of 35 dBZ
+        self.kmax = DEFAULT_KMAX
+        self.delk = DEFAULT_DELK
+        self.delz = DEFAULT_DELZ
+        self.zh_adjustments = {}
+        self.zdr_offsets = {}
         self.I1 = {}
         self.I2 = {}
         self.expected_zdr = {}
@@ -946,7 +956,7 @@ class SelfConsistentAnalysis(MaskHelper):
             self._get_expected_vals(key)
             self.I1[key] = np.dot(self.expected_kdp[key],
                                   DEFAULT_DELZ*self.number_of_obs[key])
-            self._compute_I2(key)
+            self._match_I2(key)
 
     def _populate_unblocked_data(self):
         """
@@ -995,11 +1005,22 @@ class SelfConsistentAnalysis(MaskHelper):
         self.weights = self.unblocked_medians['N'] * self.unblocked_medians['KD']
         self.weights = self.weights / self.weights.sum()
 
-    def _compute_I2(self, key):
-        exponent = (-1.0*self.a + 1.0*self.zh_range - \
-                    self.c*self.expected_zdr[key]) / self.b
-        power = 10.0**exponent
-        self.I2[key] = np.dot(power, DEFAULT_DELZ*self.number_of_obs[key])
+    def _match_I2(self, key):
+        #Assume ZDR, apart from any inherent bias, should be zero at Z = 0 dBZ
+        self.zdr_offsets[key] = 1.0 * self.expected_zdr[key][0]
+        itest = np.zeros(kmax)
+        for i in xrange(len(self.zh_range)):
+            for k in xrange(self.kmax):
+                dztest = k * self.delk + self.zh_range + 0.5
+                expon = dztest[i] / self.b - self.a / self.b - self.c * \
+                    (self.expected_zdr[key][i] - self.zdr_offsets[key] + \
+                     self.unblocked_medians['DR'][0]) / self.b
+                itest[k] += self.delz * self.number_of_obs[key][i] * 10.0**expon
+        diff = np.abs(self.I1[key] - itest)
+        kmin = np.argmin(diff)
+        print key, self.I1[key], itest[kmin], diff[kmin], self.delk*kmin
+        self.I2[key] = itest[kmin]
+        self.zh_adjustments[key] = self.delk * kmin
 
     def _get_expected_vals(self, key):
         tmp_dz = np.array(self.fsc_data['DZ'][key])
@@ -1016,10 +1037,7 @@ class SelfConsistentAnalysis(MaskHelper):
                 self.expected_zdr[key][index] = np.median(tmp_dr[mask])
                 self.expected_kdp[key][index] = np.median(tmp_kd[mask])
 
-    #Methods to do integrations and compare them to determine blockage
-    #Check that integrations are actually working - use NAME data?
     #Method to determine/apply ZDR corrections
-    #Method to derive ZDR depression based on <ZDR(Z=0)>?
 
 #####################################
 
@@ -1074,7 +1092,6 @@ def calc_median_ci(array):
     else:
         return Nint, BAD, BAD, BAD
 
-@fn_timer
 def multiple_linear_regression(dependent_var, independent_vars):
     """
     Simple unweighted least-squares multiple linear regression using 
@@ -1086,9 +1103,8 @@ def multiple_linear_regression(dependent_var, independent_vars):
     beta_hat = np.linalg.lstsq(X,y)[0]
     return beta_hat
 
-@fn_timer
 def weighted_multiple_linear_regression(dependent_var, independent_vars,
-                                    weights):
+                                        weights):
     """
     Simple weighted least-squares multiple linear regression using
     statsmodel module.
