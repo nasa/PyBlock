@@ -93,6 +93,7 @@ DEFAULT_ZMAX = 55
 DEFAULT_DELZ = 1.0
 DEFAULT_DELK = 0.1 #Resolution (dBZ) of I2 integrations (FSC)
 DEFAULT_KMAX = 350 #Multiply by delk to get maximum block considered by FSC
+MAX_CORRECTION = DEFAULT_DELK * DEFAULT_KMAX
 
 #####################################
 
@@ -192,6 +193,8 @@ class BeamBlockSingleVolume(object):
             self.rain_total_pts = 0
             self.drizz_total_pts = 0
             self.radar = radar.extract_sweeps([self.sweep])
+            if kwargs['fhc_name'] in self.radar.fields.keys():
+                kwargs['fhc_flag'] = False
             self.retrieve = dualpol.DualPolRetrieval(self.radar, **kwargs)
             self.retrieve.name_vr = kwargs['vr']
             self.thresh_sdp = kwargs['thresh_sdp']
@@ -344,12 +347,14 @@ class BeamBlockSingleVolume(object):
             new_mask = np.logical_or(self.insect_mask, self.trip2_mask)
         else:
             new_mask = self.insect_mask
-        if not hasattr(self.thresh_sdp, '__len__'):
-            self.thresh_sdp = 0.0 * self.dz + self.thresh_sdp
-        sdp_array = self.retrieve.extract_unmasked_data(self.retrieve.name_sdp)
-        self.sdp_mask = csu_misc.differential_phase_filter(sdp_array,
+        if hasattr(self.retrieve, 'name_sdp'):
+            if not hasattr(self.thresh_sdp, '__len__'):
+                self.thresh_sdp = 0.0 * self.dz + self.thresh_sdp
+            sdp_array = \
+                  self.retrieve.extract_unmasked_data(self.retrieve.name_sdp)
+            self.sdp_mask = csu_misc.differential_phase_filter(sdp_array,
                                                            self.thresh_sdp)
-        new_mask = np.logical_or(new_mask, self.sdp_mask)
+            new_mask = np.logical_or(new_mask, self.sdp_mask)
         self.bad_data_mask = new_mask
 
 #####################################
@@ -817,7 +822,7 @@ class Corrections(object):
 
     def determine_corrections(self, verbose=False):
         for i, az in enumerate(self.blocked_azimuths):
-            if self.difference[i] <= -1.0 * self.uncertainty:
+            if np.abs(self.difference[i]) >= 1.0 * self.uncertainty:
                 if np.abs(self.difference[i]) > 0.5 * self.conf_bl[i]:
                     self.suggested_corrections['standard'][i] = \
                            -1.0 * self.difference[i]
@@ -827,6 +832,10 @@ class Corrections(object):
                 if np.abs(self.difference[i]) > np.abs(self.diff_ci_hi[i]):
                     self.suggested_corrections['strict'][i] = \
                            -1.0 * self.difference[i]
+            for key in self.suggested_corrections.keys():
+                if key != 'azimuth':
+                    mask = np.abs(self.suggested_corrections[key]) > MAX_CORRECTION
+                    self.suggested_corrections[key][mask] = BAD
             if verbose:
                 print az, ["%.2f" % np.round(self.suggested_corrections[key][i],
                            decimals=2) for key in self.suggested_corrections.keys()
@@ -844,8 +853,6 @@ class Corrections(object):
             self.median = kdp_analysis.drizz_median
             self.uncertainty = DEFAULT_ZDR_UNCERTAINTY
 
-    #Fix treatment of -32768s
-
 #####################################
 
 class SelfConsistentAnalysis(MaskHelper):
@@ -854,6 +861,27 @@ class SelfConsistentAnalysis(MaskHelper):
     Class to facilitate the diagnosis of partial beam blockage via the fully
     self-consistent (FSC) method as applied in Lang et al. (2009). The anchor
     reference for this technique is Giangrande and Ryzhkov (2005).
+    
+    Since this can be confusing, let's explain how we treat the data.
+    
+    *self.Azimuth, self.blocked_azimuths, and self.unblocked_azimuths are float
+     arrays that give the actual azimuth associated with each bin.
+    *self.azimuth_indices and its blocked and unblocked variants are integer
+     arrays that provide the relevant bin number for each azimuth. This 
+     distinction with the above allows the user to set wider or narrower bins
+     than 1 deg. Then string conversions of these indices are the dictionary
+     keys for the zh_adjustments and other associated attributes.
+     
+    A simple code snippet to get the zh_adjustments in a more typical array
+    format is as follows:
+    
+    zh_adjustments_array = []
+    for index in self.blocked_azimuth_indices:
+        key = str(index)
+        zh_adjustments_array.append(self.zh_adjustments[key])
+    
+    Then you could, for example, easily plot zh_adjustments_array vs. 
+    self.blocked_azimuths.
     """
 
     def __init__(self, filename, azimuths=[(0,360)]):
@@ -876,7 +904,8 @@ class SelfConsistentAnalysis(MaskHelper):
 
     def regress_unblocked_medians(self, zmin=0):
         """
-        Performs multiple linear regression to obtain coefficients for line:
+        Performs weighted multiple linear regression to obtain coefficients for 
+        self-consistency relationship:
         Zestimate = b * log10(Kdp) + c * Zdr + a (cf. Eq. 1, Lang et al., 2009).
         This is done using median values for unblocked data, with Zh being
         binned up and Kdp and Zdr medians within each bin being determined.
@@ -888,6 +917,7 @@ class SelfConsistentAnalysis(MaskHelper):
         Key output
         ----------
         self.beta_hat = list of coefficients for above eq. (order = [b, c, a])
+        self.a, self.b, self.c = more direct storage for these coefficients
         """
         self._populate_unblocked_data()
         self._get_medians()
@@ -897,12 +927,20 @@ class SelfConsistentAnalysis(MaskHelper):
         mask = np.logical_and(mask, self.unblocked_medians['DZ'] > zmin)
         self.logKdp = np.log10(self.unblocked_medians['KD'])
         self.beta_hat = \
-           weighted_multiple_linear_regression(self.unblocked_medians['DZ'][mask],
+          weighted_multiple_linear_regression(self.unblocked_medians['DZ'][mask],
            [self.logKdp[mask], self.unblocked_medians['DR'][mask]],
            self.weights[mask])
-        self.b = self.beta_hat[0]
-        self.c = self.beta_hat[1]
-        self.a = self.beta_hat[2]
+        self.define_coefficients(self.beta_hat[2], self.beta_hat[0],
+                                 self.beta_hat[1])
+ 
+    def define_coefficients(self, a, b, c):
+        """
+        Define a, b, and c in the self-consistency relationship:
+        Z = a + b * log10(Kdp) + c * Zdr
+        """
+        self.a = a
+        self.b = b
+        self.c = c
  
     def plot_histogram_unblocked(self, save=None, domain=DEFAULT_DOMAIN,
                                  zmin=None):
@@ -915,12 +953,12 @@ class SelfConsistentAnalysis(MaskHelper):
         save = Name of image file to save figure to.
         domain = 2-element tuple to narrow down the display range of histogram.
         """
-        if not hasattr(self, 'beta_hat') or zmin is not None:
+        if not hasattr(self, 'a') or zmin is not None:
             if zmin is None:
                 zmin = 0
             self.regress_unblocked_medians(zmin=zmin)
-        data = linear_calc(self.beta_hat, [np.log10(self.unblocked_data['KD']),
-                                           self.unblocked_data['DR']])
+        data = linear_calc([self.b, self.c, self.a],
+               [np.log10(self.unblocked_data['KD']), self.unblocked_data['DR']])
         lim = DEFAULT_DOMAIN
         fig = plt.figure(figsize=(6,5))
         hist = plt.hist2d(data, self.unblocked_data['DZ'], bins=80,
@@ -937,10 +975,33 @@ class SelfConsistentAnalysis(MaskHelper):
     def compute_I1_and_I2(self):
         """
         Compute the I1 and I2 integrals from Eq. 2-3 in Lang et al. (2009).
+        Loops thru each of the blocked azimuth bins. First it will
+        integrate the I1 side of the self-consistency relationship. Then it
+        integrates the I2 side of the relationship and checks a variety of 
+        possible Zh offsets to see which one best matches I1. The resolution 
+        of the offset steps is delk, and kmax*delk is the maximum possible Zh 
+        offset examined. The zh_adjustments attribute then holds all of the Zh 
+        offsets to apply at each azimuth bin. If it is 0 then there is no 
+        offset to apply at that azimuth. If it is equal to delk*(kmax-1)
+        then the solution likely did not converge and the block is too strong.
+        Note that blocks ~30 dBZ or more are extremely difficult to correct,
+        and even 20+ dBZ corrections are likely associated with greater error
+        than weaker blocks.
+        
+        Assumes <ZDR> should match inherent offset in unblocked data when 
+        Z=0 dBZ. This is used to develop the zdr_offset attribute.
+        
+        Key Outputs
+        -----------
+        zh_adjustment = Add to Zh at each azimuth bin to correct for blockage.
+        zdr_offsets = Difference between <ZDR(Z=0)> at each blocked azimuth and
+                      the same parameter in unblocked data. Apply to the ZDR
+                      data in blocked regions to force it to match unblocked
+                      behavior. This is an alternative to correcting ZDR via
+                      the KDP method.
         """
         if not hasattr(self, 'beta_hat'):
             self.regress_unblocked_medians()
-        #Currently set to check up to a block maximum of 35 dBZ
         self.kmax = DEFAULT_KMAX
         self.delk = DEFAULT_DELK
         self.delz = DEFAULT_DELZ
@@ -957,6 +1018,8 @@ class SelfConsistentAnalysis(MaskHelper):
             self.I1[key] = np.dot(self.expected_kdp[key],
                                   DEFAULT_DELZ*self.number_of_obs[key])
             self._match_I2(key)
+        print 'Zh adjustments determined and stored as zh_adjustments attribute'
+        print 'ZDR offsets stored as zdr_offsets attribute'
 
     def _populate_unblocked_data(self):
         """
@@ -985,6 +1048,7 @@ class SelfConsistentAnalysis(MaskHelper):
             warn('DZ DR KD not equal length, going to #FAIL: ' + wstr)
 
     def _get_medians(self):
+        """Determine median Zdr/Kdp as function of Z for unblocked regions"""
         self.unblocked_medians = {}
         self.unblocked_medians['DZ'] = self.zh_range + 0.5
         self.unblocked_medians['KD'] = np.zeros(len(self.zh_range)) - 999.0
@@ -1002,27 +1066,35 @@ class SelfConsistentAnalysis(MaskHelper):
                                np.median(self.unblocked_data['DR'][mask])
 
     def _get_weights(self):
+        """Weight by number of Kdp/Zdr observations in each Z bin"""
         self.weights = self.unblocked_medians['N'] * self.unblocked_medians['KD']
         self.weights = self.weights / self.weights.sum()
 
     def _match_I2(self, key):
-        #Assume ZDR, apart from any inherent bias, should be zero at Z = 0 dBZ
+        """Loop thru all possible reflectivity offsets up to delk*kmax"""
+        #Make sure this doesn't blow up if Zdr data missing at low Z values
+        mask = self.unblocked_medians['DR'] > -100
+        unblocked_zdr = self.unblocked_medians['DR'][mask]
+        #Get zdr_offset at this azimuth
+        #If missing Zdr data at low Z, this will just be 0
+        #Leaving this for now, not sure if worth fixing ...
         self.zdr_offsets[key] = 1.0 * self.expected_zdr[key][0]
-        itest = np.zeros(kmax)
+        itest = np.zeros(self.kmax)
         for i in xrange(len(self.zh_range)):
             for k in xrange(self.kmax):
                 dztest = k * self.delk + self.zh_range + 0.5
                 expon = dztest[i] / self.b - self.a / self.b - self.c * \
                     (self.expected_zdr[key][i] - self.zdr_offsets[key] + \
-                     self.unblocked_medians['DR'][0]) / self.b
+                     unblocked_zdr[0]) / self.b
                 itest[k] += self.delz * self.number_of_obs[key][i] * 10.0**expon
         diff = np.abs(self.I1[key] - itest)
         kmin = np.argmin(diff)
-        print key, self.I1[key], itest[kmin], diff[kmin], self.delk*kmin
+        #print key, self.I1[key], itest[kmin], diff[kmin], self.delk*kmin
         self.I2[key] = itest[kmin]
         self.zh_adjustments[key] = self.delk * kmin
 
     def _get_expected_vals(self, key):
+        """Obtain expected values for Zdr/Kdp for each blocked azimuth bin"""
         tmp_dz = np.array(self.fsc_data['DZ'][key])
         tmp_kd = np.array(self.fsc_data['KD'][key])
         tmp_dr = np.array(self.fsc_data['DR'][key])
@@ -1037,11 +1109,9 @@ class SelfConsistentAnalysis(MaskHelper):
                 self.expected_zdr[key][index] = np.median(tmp_dr[mask])
                 self.expected_kdp[key][index] = np.median(tmp_kd[mask])
 
-    #Method to determine/apply ZDR corrections
-
-#####################################
-
-#####################################
+    #Fix issues with regression being forced if we want to replot histogram
+    #Check on negative I1 values in data-sparse azimuths
+    #Add way to specify Zdr offsets manually or import from KdpMethodAnalysis?
 
 #####################################
 
@@ -1126,10 +1196,3 @@ def linear_calc(coef, independent_vars):
     return np.dot(X, coef)
 
 #####################################
-
-#####################################
-
-
-
-
-
