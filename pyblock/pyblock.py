@@ -471,7 +471,7 @@ class BeamBlockMultiVolume(BlockStats):
         if self.stats_flag:
             print 'Read stats file, making a plot'
             self.make_plots()
-        #Otherwise, if provided a list of radar volume filenames, start processing!
+        #Otherwise, if provided list of radar volume filenames, start processing!
         else:
             self.get_sounding_list()
             self.process_multiple_volumes()
@@ -546,36 +546,26 @@ class BeamBlockMultiVolume(BlockStats):
         populated with blockage data from a previous run (e.g., on a different
         dataset from the same radar).
         """
-        try:
-            store = RawDataStorage(filename=self.save)
-            self.Azimuth = store.Azimuth
-            self.rain_refl = store.rain_refl
-            self.drizz_zdr = store.drizz_zdr
-            self.fsc_data = store.fsc_data
-            self.rain_total_pts = 0
-            self.drizz_total_pts = 0
-            for key in self.rain_refl.keys():
-                self.rain_total_pts += len(self.rain_refl[key])
-                self.drizz_total_pts += len(self.drizz_zdr[key])
-            if bb.nbins != len(self.Azimuth):
-                warn('Wrong number of azimuth bins, going to #FAIL')
-        except:
-            self.rain_total_pts = 0
-            self.drizz_total_pts = 0
-            self.rain_refl = {}
-            self.drizz_zdr = {}
-            self.fsc_data = {}
-            self.fsc_data['DZ'] = {}
-            self.fsc_data['DR'] = {}
-            self.fsc_data['KD'] = {}
-            self.Azimuth = np.zeros(bb.nbins)
-            for j in xrange(len(self.Azimuth)):
-                self.rain_refl[np.str(j)] = []
-                self.drizz_zdr[np.str(j)] = []
-                self.fsc_data['DZ'][np.str(j)] = []
-                self.fsc_data['DR'][np.str(j)] = []
-                self.fsc_data['KD'][np.str(j)] = []
-                self.Azimuth[j] = bb.bin_width * j
+        if self.save is not None:
+            try:
+                store = RawDataStorage(filename=self.save)
+                self.Azimuth = store.Azimuth
+                self.rain_refl = store.rain_refl
+                self.drizz_zdr = store.drizz_zdr
+                self.fsc_data = store.fsc_data
+                self.rain_total_pts = 0
+                self.drizz_total_pts = 0
+                for key in self.rain_refl.keys():
+                    self.rain_total_pts += len(self.rain_refl[key])
+                    self.drizz_total_pts += len(self.drizz_zdr[key])
+                if bb.nbins != len(self.Azimuth):
+                    wstr = 'bb.nbins, self.Azimuth = ' + str(bb.nbins) + \
+                           ', ' + str(self.Azimuth)
+                    warn('Wrong number of azimuth bins, going to #FAIL - '+wstr)
+            except:
+                self._start_from_scratch(bb)
+        else:
+            self._start_from_scratch(bb)
 
     def get_statistics(self):
         """
@@ -622,15 +612,15 @@ class BeamBlockMultiVolume(BlockStats):
         Checks first if stats file, then if not checks if argument is list or
         a single basestring (i.e., one file)
         """
-        try:
-            self.load_stats(files)
-            self.stats_flag = True
-        except:
-            self.stats_flag = False
-            if isinstance(files, basestring):
+        self.stats_flag = False
+        if isinstance(files, basestring):
+            try:
+                self.load_stats(files)
+                self.stats_flag = True
+            except:
                 self.file_list = [files]
-            else:
-                self.file_list = files
+        else:
+            self.file_list = files
 
     def get_sounding_list(self):
         """ 
@@ -651,7 +641,23 @@ class BeamBlockMultiVolume(BlockStats):
                 sndlist = sounding
         self.sounding_list = sndlist
 
-    #Check that different bin size than 1.0 dB works OK with indices, etc.
+    def _start_from_scratch(self, bb):
+        self.rain_total_pts = 0
+        self.drizz_total_pts = 0
+        self.rain_refl = {}
+        self.drizz_zdr = {}
+        self.fsc_data = {}
+        self.fsc_data['DZ'] = {}
+        self.fsc_data['DR'] = {}
+        self.fsc_data['KD'] = {}
+        self.Azimuth = np.zeros(bb.nbins)
+        for j in xrange(len(self.Azimuth)):
+            self.rain_refl[np.str(j)] = []
+            self.drizz_zdr[np.str(j)] = []
+            self.fsc_data['DZ'][np.str(j)] = []
+            self.fsc_data['DR'][np.str(j)] = []
+            self.fsc_data['KD'][np.str(j)] = []
+            self.Azimuth[j] = bb.bin_width * j
 
 #####################################
 
@@ -771,87 +777,54 @@ class KdpMethodAnalysis(BlockStats, MaskHelper):
 
     def calc_blockage_correction(self):
         self.length = len(self.blocked_azimuths)
-        self.zh_adjustments = Corrections(self, True)
-        self.zdr_adjustments = Corrections(self, False)
+        self.zh_adjustments = Corrections(self, zh_flag=True)
+        self.zdr_adjustments = Corrections(self, zh_flag=False)
 
-    #Check ZDR corrections against IDL version
-    #Test w/ previously determined statistics from IDL programs -
-    #interface class?
+    def print_out_data(self, filename='suggested_kdp_corrections.txt'):
+        self.printout = PrintBlock(self, filename=filename, kdp_flag=True)
 
-#####################################
+    def plot_corrections(self, save='kdp_corrections.png', return_flag=False,
+                         method='standard'):
+        plot = _PlotBlock(self, save=save, method=method)
+        if return_flag:
+            return plot.fig, plot.ax1, plot.ax2
 
-class Corrections(object):
+    def edit_corrections(self, azimuths, offsets, var='DZ', method='standard'):
+        """
+        azimuths = list of azimuths to adjust
+        offsets = list of offsets to change to, same size and order as azimuths
+        var = change to 'DR', 'ZDR', or 'ZD' to adjust ZDR rather than ZH
+        method = 'standard', 'strict', or 'loose'
+        """
+        if not hasattr(azimuths, '__len__'):
+            azimuths = [azimuths]
+        if not hasattr(offsets, '__len__'):
+            offsets = [offsets]
+        if len(azimuths) != len(offsets):
+            warn('Arguments must be same size, fix and try again')
+            return
+        for i, azimuth in enumerate(azimuths):
+            if var.upper() == 'DR' or var.upper() == 'ZDR' or var.upper() == 'ZD':
+                self.zdr_adjustments.suggested_corrections = \
+                self._correct(self.zdr_adjustments.suggested_corrections, method,
+                              offsets[i], azimuth)
+            else:
+                self.zh_adjustments.suggested_corrections = \
+                self._correct(self.zh_adjustments.suggested_corrections, method,
+                              offsets[i], azimuth)
 
-    """
-    Calculate the suggested reflectivity/ZDR corrections. There are currently
-    three approaches, which will tend to agree in well-behaved data (i.e.,
-    confidence intervals are narrow). In data with wide confidence intervals,
-    some corrections may not end up being suggested due to lack of certainty.
-    standard: Difference between median reflectivity/ZDR in blocked azimuth
-              and median of unblocked azimuths is > 1 dBZ or 0.1 dB (default) and
-              the difference is greater than half the 95% confidence interval
-              at that azimuth.
-    loose: standard conditions apply plus the difference between the high
-            value in the 95% interval at the blocked azimuth and the median in
-            unblocked azimuths is still greater than half the unblocked
-            confidence interval.
-    strict: Difference between median reflectivity/ZDR in blocked azimuth
-            and median of unblocked azimuths is > 1 dBZ or 0.1 dB (default) and the
-            difference is greater than the the difference between the high
-            value in the 95% interval at the blocked azimuth and the median
-            in unblocked azimuths.
-    """
+    def _correct(self, adjust, method, offset, azimuth):
+        diff = np.abs(azimuth - adjust['azimuth'])
+        index = np.argmin(diff)
+        try:
+            adjust[method][index] = offset
+        except KeyError:
+            warn('Bad method used, not adjusting: '+method)
+        return adjust
 
-    def __init__(self, kdp_analysis, zh_flag=True, verbose=False):
-        self.blocked_azimuths = kdp_analysis.blocked_azimuths
-        self.length = kdp_analysis.length
-        self._check_var(kdp_analysis, zh_flag, verbose)
-        self.suggested_corrections = {}
-        self.suggested_corrections['azimuth'] = self.blocked_azimuths
-        for key in ['standard', 'strict', 'loose']:
-            self.suggested_corrections[key] = np.zeros(self.length)
-        self.determine_differences()
-        self.determine_corrections(verbose=verbose)
- 
-    def determine_differences(self):
-        self.difference = self.blocked_stats['median'] - self.median
-        self.conf_bl = self.blocked_stats['high'] - self.blocked_stats['low']
-        self.diff_ci_hi = self.blocked_stats['high'] - self.median
-        self.conf_unbl = np.max(self.unblocked_stats['high'] - \
-                                self.unblocked_stats['low'])
-
-    def determine_corrections(self, verbose=False):
-        for i, az in enumerate(self.blocked_azimuths):
-            if np.abs(self.difference[i]) >= 1.0 * self.uncertainty:
-                if np.abs(self.difference[i]) > 0.5 * self.conf_bl[i]:
-                    self.suggested_corrections['standard'][i] = \
-                           -1.0 * self.difference[i]
-                    if np.abs(self.diff_ci_hi[i]) > 0.5 * self.conf_unbl:
-                        self.suggested_corrections['loose'][i] = \
-                                -1.0 * self.difference[i]
-                if np.abs(self.difference[i]) > np.abs(self.diff_ci_hi[i]):
-                    self.suggested_corrections['strict'][i] = \
-                           -1.0 * self.difference[i]
-            for key in self.suggested_corrections.keys():
-                if key != 'azimuth':
-                    mask = np.abs(self.suggested_corrections[key]) > MAX_CORRECTION
-                    self.suggested_corrections[key][mask] = BAD
-            if verbose:
-                print az, ["%.2f" % np.round(self.suggested_corrections[key][i],
-                           decimals=2) for key in self.suggested_corrections.keys()
-                           if not key == 'azimuth']
-
-    def _check_var(self, kdp_analysis, zh_flag, verbose):
-        if zh_flag:
-            self.blocked_stats = kdp_analysis.blocked_rain_stats
-            self.unblocked_stats = kdp_analysis.unblocked_rain_stats
-            self.median = kdp_analysis.rain_median
-            self.uncertainty = DEFAULT_ZH_UNCERTAINTY
-        else:
-            self.blocked_stats = kdp_analysis.blocked_drizz_stats
-            self.unblocked_stats = kdp_analysis.unblocked_drizz_stats
-            self.median = kdp_analysis.drizz_median
-            self.uncertainty = DEFAULT_ZDR_UNCERTAINTY
+    #Check ZDR corrections against IDL version & SelfConsistentAnalysis
+    #Test w/ previously det. statistics from IDL programs - interface class?
+    #Manually add/correct "bias" in Zdr vs. Azimuth
 
 #####################################
 
@@ -943,7 +916,7 @@ class SelfConsistentAnalysis(MaskHelper):
         self.c = c
  
     def plot_histogram_unblocked(self, save=None, domain=DEFAULT_DOMAIN,
-                                 zmin=None):
+                                 zmin=0):
         """
         Plots a simple 2-D histogram for visualizing the results and performance
         of the regress_unblocked_data() method.
@@ -952,10 +925,9 @@ class SelfConsistentAnalysis(MaskHelper):
         --------
         save = Name of image file to save figure to.
         domain = 2-element tuple to narrow down the display range of histogram.
+        zmin = Minimum Zh to consider in regression (if redone).
         """
-        if not hasattr(self, 'a') or zmin is not None:
-            if zmin is None:
-                zmin = 0
+        if not hasattr(self, 'a'):
             self.regress_unblocked_medians(zmin=zmin)
         data = linear_calc([self.b, self.c, self.a],
                [np.log10(self.unblocked_data['KD']), self.unblocked_data['DR']])
@@ -972,7 +944,7 @@ class SelfConsistentAnalysis(MaskHelper):
         if save is not None:
             plt.savefig(save)
 
-    def compute_I1_and_I2(self):
+    def compute_I1_and_I2(self, kdp_analysis=None):
         """
         Compute the I1 and I2 integrals from Eq. 2-3 in Lang et al. (2009).
         Loops thru each of the blocked azimuth bins. First it will
@@ -993,14 +965,56 @@ class SelfConsistentAnalysis(MaskHelper):
         
         Key Outputs
         -----------
-        zh_adjustment = Add to Zh at each azimuth bin to correct for blockage.
+        zh_adjustments = Add to Zh at each azimuth bin to correct for blockage.
         zdr_offsets = Difference between <ZDR(Z=0)> at each blocked azimuth and
                       the same parameter in unblocked data. Apply to the ZDR
                       data in blocked regions to force it to match unblocked
                       behavior. This is an alternative to correcting ZDR via
                       the KDP method.
         """
-        if not hasattr(self, 'beta_hat'):
+        
+        self._intitialize_for_integrations()
+        for i, index in enumerate(self.blocked_azimuth_indices):
+            key = str(index)
+            self._get_expected_vals(key)
+            self.I1[key] = np.dot(self.expected_kdp[key],
+                                  DEFAULT_DELZ*self.number_of_obs[key])
+            self._match_I2(i, key, kdp_analysis=kdp_analysis)
+        print 'Zh adjustments determined and stored as zh_adjustments attribute'
+        print 'ZDR offsets stored as zdr_offsets attribute'
+
+    def print_out_data(self, filename='suggested_fsc_corrections.txt'):
+        self.printout = PrintBlock(self, filename=filename, kdp_flag=False)
+    
+    def plot_corrections(self, save='fsc_corrections.png', return_flag=False):
+        plot = _PlotBlock(self, save=save)
+        if return_flag:
+            return plot.fig, plot.ax1, plot.ax2
+ 
+    def edit_corrections(self, azimuths, offsets, var='DZ'):
+        """
+        azimuths = list of azimuths to adjust
+        offsets = list of offsets to change to, same size and order as azimuths
+        var = change to 'DR', 'ZDR', or 'ZD' to adjust ZDR rather than ZH
+        """
+        if not hasattr(azimuths, '__len__'):
+            azimuths = [azimuths]
+        if not hasattr(offsets, '__len__'):
+            offsets = [offsets]
+        if len(azimuths) != len(offsets):
+            warn('Arguments must be same size, fix and try again')
+            return
+        for i, azimuth in enumerate(azimuths):
+            diff = np.abs(azimuth-self.blocked_azimuths)
+            index = np.argmin(diff)
+            key = str(self.blocked_azimuth_indices[index])
+            if var.upper() == 'DR' or var.upper() == 'ZDR' or var.upper() == 'ZD':
+                self.zdr_offsets[key] = offsets[i]
+            else:
+                self.zh_adjustments[key] = offsets[i]
+
+    def _intitialize_for_integrations(self):
+        if not hasattr(self, 'a'):
             self.regress_unblocked_medians()
         self.kmax = DEFAULT_KMAX
         self.delk = DEFAULT_DELK
@@ -1012,14 +1026,6 @@ class SelfConsistentAnalysis(MaskHelper):
         self.expected_zdr = {}
         self.expected_kdp = {}
         self.number_of_obs = {}
-        for i, index in enumerate(self.blocked_azimuth_indices):
-            key = str(index)
-            self._get_expected_vals(key)
-            self.I1[key] = np.dot(self.expected_kdp[key],
-                                  DEFAULT_DELZ*self.number_of_obs[key])
-            self._match_I2(key)
-        print 'Zh adjustments determined and stored as zh_adjustments attribute'
-        print 'ZDR offsets stored as zdr_offsets attribute'
 
     def _populate_unblocked_data(self):
         """
@@ -1038,7 +1044,10 @@ class SelfConsistentAnalysis(MaskHelper):
                 self.fsc_data['DR'][str(index)])
             self.unblocked_data['KD'] = np.append(self.unblocked_data['KD'],
                 self.fsc_data['KD'][str(index)])
-        #Simple check to make sure everything is the same size
+        self._check_lengths()
+        
+    def _check_lengths(self):
+        """Simple check to make sure everything is the same size"""
         if len(self.unblocked_data['KD']) != len(self.unblocked_data['DZ']) or\
            len(self.unblocked_data['KD']) != len(self.unblocked_data['DR']) or\
            len(self.unblocked_data['DZ']) != len(self.unblocked_data['DR']):
@@ -1054,6 +1063,9 @@ class SelfConsistentAnalysis(MaskHelper):
         self.unblocked_medians['KD'] = np.zeros(len(self.zh_range)) - 999.0
         self.unblocked_medians['DR'] = np.zeros(len(self.zh_range)) - 999.0
         self.unblocked_medians['N'] = np.zeros(len(self.zh_range))
+        self._loop_to_get_medians()
+
+    def _loop_to_get_medians(self):
         indices = np.int32(np.floor(self.unblocked_data['DZ']))
         for index in self.zh_range:
             mask = indices == index
@@ -1070,28 +1082,42 @@ class SelfConsistentAnalysis(MaskHelper):
         self.weights = self.unblocked_medians['N'] * self.unblocked_medians['KD']
         self.weights = self.weights / self.weights.sum()
 
-    def _match_I2(self, key):
+    def _match_I2(self, ii, key, kdp_analysis=None):
         """Loop thru all possible reflectivity offsets up to delk*kmax"""
-        #Make sure this doesn't blow up if Zdr data missing at low Z values
-        mask = self.unblocked_medians['DR'] > -100
-        unblocked_zdr = self.unblocked_medians['DR'][mask]
-        #Get zdr_offset at this azimuth
-        #If missing Zdr data at low Z, this will just be 0
-        #Leaving this for now, not sure if worth fixing ...
-        self.zdr_offsets[key] = 1.0 * self.expected_zdr[key][0]
+        self._get_zdr_offset(ii, key, kdp_analysis)
         itest = np.zeros(self.kmax)
         for i in xrange(len(self.zh_range)):
             for k in xrange(self.kmax):
                 dztest = k * self.delk + self.zh_range + 0.5
                 expon = dztest[i] / self.b - self.a / self.b - self.c * \
-                    (self.expected_zdr[key][i] - self.zdr_offsets[key] + \
-                     unblocked_zdr[0]) / self.b
+                    (self.expected_zdr[key][i] + self.zdr_offsets[key]) / self.b
                 itest[k] += self.delz * self.number_of_obs[key][i] * 10.0**expon
         diff = np.abs(self.I1[key] - itest)
         kmin = np.argmin(diff)
         #print key, self.I1[key], itest[kmin], diff[kmin], self.delk*kmin
         self.I2[key] = itest[kmin]
         self.zh_adjustments[key] = self.delk * kmin
+
+    def _get_zdr_offset(self, ii, key, kdp_analysis):
+        #Make sure this doesn't blow up if Zdr data missing at low Z values
+        mask = self.unblocked_medians['DR'] > -100
+        unblocked_zdr = self.unblocked_medians['DR'][mask]
+        #Get zdr_offset at this azimuth
+        if kdp_analysis is None:
+            #If missing Zdr data at low Z, this will just be 0
+            #Leaving this for now, not sure if worth fixing ...
+            self.zdr_offsets[key] = unblocked_zdr[0] - self.expected_zdr[key][0]
+        else:
+            #Use kdp_analysis-determined Zdr offset instead
+            azdiff = np.abs(self.blocked_azimuths[ii] - \
+                 kdp_analysis.zdr_adjustments.suggested_corrections['azimuth'])
+            azin = np.argmin(azdiff)
+            testzdr = 1.0 * \
+               kdp_analysis.zdr_adjustments.suggested_corrections['standard'][azin]
+            if testzdr > -100:
+                self.zdr_offsets[key] = testzdr
+            else:
+                self.zdr_offsets[key] = 0.0
 
     def _get_expected_vals(self, key):
         """Obtain expected values for Zdr/Kdp for each blocked azimuth bin"""
@@ -1109,9 +1135,241 @@ class SelfConsistentAnalysis(MaskHelper):
                 self.expected_zdr[key][index] = np.median(tmp_dr[mask])
                 self.expected_kdp[key][index] = np.median(tmp_kd[mask])
 
-    #Fix issues with regression being forced if we want to replot histogram
-    #Check on negative I1 values in data-sparse azimuths
-    #Add way to specify Zdr offsets manually or import from KdpMethodAnalysis?
+#####################################
+
+class Corrections(object):
+
+    """
+    Calculate the suggested reflectivity/ZDR corrections. There are currently
+    three approaches, which will tend to agree in well-behaved data (i.e.,
+    confidence intervals are narrow). In data with wide confidence intervals,
+    some corrections may not end up being suggested due to lack of certainty.
+    standard: Difference between median reflectivity/ZDR in blocked azimuth
+              and median of unblocked azimuths is > 1 dBZ or 0.1 dB (default) and
+              the difference is greater than half the 95% confidence interval
+              at that azimuth.
+    loose: standard conditions apply plus the difference between the high
+            value in the 95% interval at the blocked azimuth and the median in
+            unblocked azimuths is still greater than half the unblocked
+            confidence interval.
+    strict: Difference between median reflectivity/ZDR in blocked azimuth
+            and median of unblocked azimuths is > 1 dBZ or 0.1 dB (default) and the
+            difference is greater than the the difference between the high
+            value in the 95% interval at the blocked azimuth and the median
+            in unblocked azimuths.
+    """
+
+    def __init__(self, kdp_analysis, zh_flag=True, verbose=False):
+        """
+        kdp_analysis = KdpMethodAnalysis object
+        zh_flag = Set to false to look at Zdr instead of Zh
+        verbose = Set to True for additional text output
+        """
+        self.blocked_azimuths = kdp_analysis.blocked_azimuths
+        self.length = kdp_analysis.length
+        self._check_var(kdp_analysis, zh_flag, verbose)
+        self.suggested_corrections = {}
+        self.suggested_corrections['azimuth'] = self.blocked_azimuths
+        for key in ['standard', 'strict', 'loose']:
+            self.suggested_corrections[key] = np.zeros(self.length)
+        self.determine_differences()
+        self.determine_corrections(verbose=verbose)
+ 
+    def determine_differences(self):
+        """
+        Prep work for determining the corrections ...
+        Figure out first the differences!
+        """
+        self.difference = self.blocked_stats['median'] - self.median
+        self.conf_bl = self.blocked_stats['high'] - self.blocked_stats['low']
+        self.diff_ci_hi = self.blocked_stats['high'] - self.median
+        self.conf_unbl = np.max(self.unblocked_stats['high'] - \
+                                self.unblocked_stats['low'])
+
+    def determine_corrections(self, verbose=False):
+        """
+        
+        """
+        for i, az in enumerate(self.blocked_azimuths):
+            if np.abs(self.difference[i]) >= 1.0 * self.uncertainty:
+                #'standard' correction
+                if np.abs(self.difference[i]) > 0.5 * self.conf_bl[i]:
+                    self.suggested_corrections['standard'][i] = \
+                           -1.0 * self.difference[i]
+                    #'loose' correction - subset of 'standard'
+                    if np.abs(self.diff_ci_hi[i]) > 0.5 * self.conf_unbl:
+                        self.suggested_corrections['loose'][i] = \
+                                -1.0 * self.difference[i]
+                #'strict' correction
+                if np.abs(self.difference[i]) > np.abs(self.diff_ci_hi[i]):
+                    self.suggested_corrections['strict'][i] = \
+                           -1.0 * self.difference[i]
+            for key in self.suggested_corrections.keys():
+                if key != 'azimuth':
+                    mask = np.abs(self.suggested_corrections[key]) > MAX_CORRECTION
+                    self.suggested_corrections[key][mask] = BAD
+            if verbose:
+                print az, ["%.2f" % np.round(self.suggested_corrections[key][i],
+                    decimals=2) for key in self.suggested_corrections.keys()
+                    if not key == 'azimuth']
+
+    def _check_var(self, kdp_analysis, zh_flag, verbose):
+        """Choose the right variables to consider depending on zh_flag"""
+        if zh_flag:
+            self.blocked_stats = kdp_analysis.blocked_rain_stats
+            self.unblocked_stats = kdp_analysis.unblocked_rain_stats
+            self.median = kdp_analysis.rain_median
+            self.uncertainty = DEFAULT_ZH_UNCERTAINTY
+        else:
+            self.blocked_stats = kdp_analysis.blocked_drizz_stats
+            self.unblocked_stats = kdp_analysis.unblocked_drizz_stats
+            self.median = kdp_analysis.drizz_median
+            self.uncertainty = DEFAULT_ZDR_UNCERTAINTY
+
+#####################################
+
+class PrintBlock(object):
+    
+    """
+    Class to print out blockage correction data to file as well as screen.
+    Powers the print_out_data() methods in KdpMethodAnalysis and 
+    SelfConsistentAnalysis classes.
+    """
+
+    def __init__(self, obj, kdp_flag=True, filename='suggested_corrections.txt'):
+        """
+        obj = KdpMethodAnalysis or SelfConsistentAnalysis object
+        kdp_flag = Switch between printing KdpMethodAnalysis or 
+                   SelfConsistentAnalysis corrections
+        filename = Name of file to write to, including path
+        """
+        if kdp_flag:
+            self.print_kdp_data(obj, filename)
+        else:
+            self.print_fsc_data(obj, filename)
+
+    def print_kdp_data(self, obj, filename):
+        """
+        Prints out Zh & Zdr corrections for all three approaches: 
+        standard, strict, & loose (values in dBZ or dB)
+        """
+        shortZH = obj.zh_adjustments.suggested_corrections
+        shortDR = obj.zdr_adjustments.suggested_corrections
+        fileobj = open(filename, 'w')
+        wstr = 'Azimuth, ZH(std), ZH(strict), ZH(loose), '+\
+               'Azimuth, DR(std), DR(strict), DR(loose)'
+        fileobj.write(wstr+'\n')
+        print wstr
+        wstr = '--------------------------------------------------------'
+        fileobj.write(wstr+'\n')
+        print wstr
+        for i, az in enumerate(shortZH['azimuth']):
+            wstr = str(az) + ',' + str(shortZH['standard'][i]) + ',' + \
+                   str(shortZH['strict'][i]) + ',' + str(shortZH['loose'][i]) \
+                   + ',' +str(shortDR['azimuth'][i]) + ',' + \
+                   str(shortDR['standard'][i]) + ',' + \
+                   str(shortDR['strict'][i]) + ',' + str(shortDR['loose'][i])
+            fileobj.write(wstr+'\n')
+            print wstr
+        fileobj.close()
+        print
+        print 'Data also written to', filename
+
+    def print_fsc_data(self, obj, filename):
+        """
+        Prints out Zh & Zdr corrections for SelfConsistentAnalysis, along with
+        I1 and matched I2 integrated values.
+        """
+        fileobj = open(filename, 'w')
+        wstr = 'Azimuth, I1, I2, ZH(fsc), DR(fsc)'
+        fileobj.write(wstr+'\n')
+        print wstr
+        wstr = '--------------------------------------------------------'
+        fileobj.write(wstr+'\n')
+        print wstr
+        for i, index in enumerate(obj.blocked_azimuth_indices):
+            key = str(index)
+            wstr = str(obj.blocked_azimuths[i]) + ',' + \
+                   str(obj.I1[key]) + ',' + str(obj.I2[key]) + ',' + \
+                   str(obj.zh_adjustments[key]) + ',' + str(obj.zdr_offsets[key])
+            fileobj.write(wstr+'\n')
+            print wstr
+        fileobj.close()
+        print
+        print 'Data also written to', filename
+
+#####################################
+
+class _PlotBlock(object):
+
+    """
+    Helper class to execute the plotting of suggested blockage corrections
+    from the KdpMethodAnalysis and SelfConsistentAnalysis classes.
+    """
+
+    def __init__(self, obj, method='standard', save='corrections.png'):
+        """
+        obj = KdpMethodAnalysis or SelfConsistentAnalysis object
+        method = Only relevant to KdpMethodAnalysis plots, can be either
+                 'standard', 'strict', or 'loose'
+        save = Full path and filename to save image file to
+        """
+        self.object = obj
+        if hasattr(obj, 'zdr_adjustments'):
+            self._translate_kdp_data(method)
+        elif hasattr(obj, 'I1'):
+            self._translate_fsc_data()
+        else:
+            warn('Not a KdpMethodAnalysis or SelfConsistentAnalysis object')
+            return
+        self._plot_corrections(save)
+
+    def _plot_corrections(self, save='corrections.png'):
+        """Simple plotting of Zh and Zdr corrections via matplotlib"""
+        self.fig = plt.figure(figsize=(13,6))
+        self.ax1 = self.fig.add_subplot(211)
+        self.ax1.plot(self.azimuths_zh, self.zh, 'kD', ms=3, label=self.label)
+        plt.xlim(0,360)
+        plt.ylim(0,35)
+        plt.xlabel('Azimuth (deg)')
+        plt.ylabel('Suggested Zh Correction (dBZ)')
+        plt.legend(numpoints=1, loc='upper left')
+        plt.title('(a) Reflectivity Corrections, '+self.label)
+        plt.xticks(30.0*np.arange(13))
+        self.ax2 = self.fig.add_subplot(212)
+        self.ax2.plot(self.azimuths_zdr, self.zdr, 'kD', ms=3, label=self.label)
+        self.ax2.plot([0,360], [0, 0], 'k--')
+        plt.xlim(0,360)
+        plt.ylim(-5,5)
+        plt.xlabel('Azimuth (deg)')
+        plt.ylabel('Suggested Zdr Correction (dB)')
+        plt.legend(numpoints=1, loc='upper left')
+        plt.title('(b) Differential Reflectivity Corrections, '+self.label)
+        plt.xticks(30.0*np.arange(13))
+        plt.tight_layout()
+        plt.savefig(save)
+
+    def _translate_kdp_data(self, method):
+        """Translates the KdpMethodAnalysis object to plottable arrays"""
+        self.label = 'KDP Method'
+        shortZH = self.object.zh_adjustments.suggested_corrections
+        shortDR = self.object.zdr_adjustments.suggested_corrections
+        self.azimuths_zh = shortZH['azimuth']
+        self.zh = shortZH[method]
+        self.azimuths_zdr = shortDR['azimuth']
+        self.zdr = shortDR[method]
+
+    def _translate_fsc_data(self):
+        """Translates the SelfConsistentAnalysis object to plottable arrays"""
+        self.label = 'FSC Method'
+        self.azimuths_zh = self.object.blocked_azimuths
+        self.azimuths_zdr = self.azimuths_zh
+        self.zh = 0.0 * self.azimuths_zh
+        self.zdr = 0.0 * self.azimuths_zdr
+        for i, index in enumerate(self.object.blocked_azimuth_indices):
+            key = str(index)
+            self.zh[i] = self.object.zh_adjustments[key]
+            self.zdr[i] = self.object.zdr_offsets[key]
 
 #####################################
 
