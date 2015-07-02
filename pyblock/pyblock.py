@@ -1,6 +1,6 @@
 """
 Python Polarimetric Radar Beam Blockage Calculation
-PyBlock v1.0
+PyBlock v1.1
 
 
 Author
@@ -29,6 +29,7 @@ program expects and how you might change those parameters.
 
 Last Updated
 ------------
+v1.1 - 04/29/2015
 v1.0 - 04/08/2015
 
 
@@ -45,11 +46,18 @@ Lang, T. J., S. W. Nesbitt, and L. D. Carey, 2009: On the correction of
 Dependencies
 ------------
 numpy, pyart, csu_radartools, dualpol, warnings, os, __future__, matplotlib, 
-statsmodels, gzip
+statsmodels, gzip, pickle
 
 
 Change Log
 ----------
+v1.1 Major Changes (04/29/2015):
+1. Added PrintBlock and _PlotBlock objects to support text printout and simple
+   plotting methods for KdpMethodAnalysis and SelfConistentAnalysis.
+2. Added capability to manually edit corrections.
+3. Fixed bug that was preventing an azimuthally varying
+   BeamBlockSingleVolume.range_thresh attribute if the user specified that.
+
 v1.0 Functionality (04/08/2015)
 1. Will compute beam blockage for any arbitrary set of polarimetric radar volumes
    via the KDP method of Lang et al. (2009). These results can be saved to file,
@@ -59,7 +67,6 @@ v1.0 Functionality (04/08/2015)
 3. Collates data relevant for calculating blockage via the FSC method. Fits 
    multiple-linear regression to determine self-consistency relationship and does 
    rainfall integration comparisons to estimate beam blockage.
-
 
 """
 from __future__ import division
@@ -107,7 +114,7 @@ DEFAULT_KW = {'sweep': 0, 'dz': 'ZH', 'dr': 'DR', 'dp': 'DP', 'rh': 'RH',
           'rain_kdp_thresh': DEFAULT_RAIN, 'drizzle_kdp_thresh': DEFAULT_DRIZZ,
           'rng_thresh': DEFAULT_RANGE, 'dsd_flag': False, 'output': 100,
           'rain_dz_thresh': 39, 'liquid_ice_flag': False, 'precip_flag': False,
-          'maxZ': DEFAULT_ZMAX}
+          'maxZ': DEFAULT_ZMAX, 'debug': False}
 
 kwargs = np.copy(DEFAULT_KW)
 
@@ -156,7 +163,7 @@ rain_dz_thresh = Reflectivity threshold below which data will not be used
 liquid_ice_flag = Set to True to also retrieve liquid/ice mass via DualPol
 precip_flag = Set to True to also retrieve rainfall rate via DualPol
 maxZ = Integer, highest Z value to consider in FSC method (to avoid ice contam.)
-
+debug = Set to True to check the BeamBlockSingleVolume processing loop
 """
 
 #####################################
@@ -186,36 +193,48 @@ class BeamBlockSingleVolume(object):
         Expects UWYO format for soundings.
         """
         kwargs = dualpol.check_kwargs(kwargs, DEFAULT_KW)
-        try:
-            radar = pyart.io.read(filename)
-            self.sweep = kwargs['sweep']
-            self.maxZ = np.int32(kwargs['maxZ'])
-            self.rain_total_pts = 0
-            self.drizz_total_pts = 0
-            self.radar = radar.extract_sweeps([self.sweep])
-            if kwargs['fhc_name'] in self.radar.fields.keys():
-                kwargs['fhc_flag'] = False
-            self.retrieve = dualpol.DualPolRetrieval(self.radar, **kwargs)
-            self.retrieve.name_vr = kwargs['vr']
-            self.thresh_sdp = kwargs['thresh_sdp']
-            self.get_bad_data_mask(magnetron=kwargs['magnetron'])
-            self.get_2d_azimuth_and_range()
-            self.get_bins(kwargs['bin_width'])
-            self.get_range_mask(kwargs['rng_thresh'])
-            #For KDP Method
-            self.partition_rain_data(kwargs['rain_kdp_thresh'],
-                      kwargs['rain_dz_thresh'], kwargs['rain_dp_thresh'])
-            self.group_rain_data()
-            self.partition_drizzle_data(kwargs['drizzle_kdp_thresh'],
-                                        kwargs['drizzle_dz_thresh'])
-            self.group_drizzle_data()
-            #For FSC Method
-            self.partition_fsc_data()
-            self.group_fsc_data()
-        except:
-            warn('Failure in reading or analyzing file, moving on ...')
-            self.Fail = True
-    
+        self.debug = kwargs['debug']
+        self.verbose = kwargs['verbose']
+        if kwargs['debug']:
+            self.main_loop(filename, kwargs)
+        else:
+            try:
+                self.main_loop(filename, kwargs)
+            except:
+                warn('Failure in reading or analyzing file, moving on ...')
+                self.Fail = True
+                print 'BeamBlockSingleVolume Read/Processing Fail =', self.Fail
+
+    def main_loop(self, filename, kwargs):
+        """Broken off into separate method to simplify code debugging"""
+        radar = pyart.io.read(filename)
+        if kwargs['debug']:
+            print 'debug radar keys', radar.fields.keys()
+        self.sweep = kwargs['sweep']
+        self.maxZ = np.int32(kwargs['maxZ'])
+        self.rain_total_pts = 0
+        self.drizz_total_pts = 0
+        self.radar = radar.extract_sweeps([self.sweep])
+        if kwargs['fhc_name'] in self.radar.fields.keys():
+            kwargs['fhc_flag'] = False
+        self.retrieve = dualpol.DualPolRetrieval(self.radar, **kwargs)
+        self.retrieve.name_vr = kwargs['vr']
+        self.thresh_sdp = kwargs['thresh_sdp']
+        self.get_bad_data_mask(magnetron=kwargs['magnetron'])
+        self.get_2d_azimuth_and_range()
+        self.get_bins(kwargs['bin_width'])
+        self.get_range_mask(kwargs['rng_thresh'])
+        #For KDP Method
+        self.partition_rain_data(kwargs['rain_kdp_thresh'],
+            kwargs['rain_dz_thresh'], kwargs['rain_dp_thresh'])
+        self.group_rain_data()
+        self.partition_drizzle_data(kwargs['drizzle_kdp_thresh'],
+                                    kwargs['drizzle_dz_thresh'])
+        self.group_drizzle_data()
+        #For FSC Method
+        self.partition_fsc_data()
+        self.group_fsc_data()
+
     def get_2d_azimuth_and_range(self):
         """
         Two-dimensionalize 1-D azimuth and range to simplify masking.
@@ -234,6 +253,8 @@ class BeamBlockSingleVolume(object):
         self.azimuth_indices = get_index(self.azimuth, bin_width)
         cond = self.azimuth_indices == self.nbins
         self.azimuth_indices[cond] = 0
+        if self.verbose:
+            print 'azimuth_indices =', self.azimuth_indices[0]
     
     def get_range_mask(self, rng_thresh):
         """
@@ -244,15 +265,20 @@ class BeamBlockSingleVolume(object):
         if not hasattr(test, '__len__'):
             self.fix_rng_thresh(rng_thresh)
         else:
-            if len(test) != self.nbins:
-                self.fix_rng_thresh(rng_thresh)
-            else:
-                self.range_thresh = rng_thresh
+            self.range_thresh = rng_thresh
         cond = 0 * self.range
         for i in xrange(np.shape(self.range)[0]):
-            subrange = self.range_thresh[self.azimuth_indices[i][0]]
-            cond[i] = np.logical_or(self.range[i] < subrange[0],
-                                    self.range[i] > subrange[1])
+            index_test = self.azimuth_indices[i][0]
+            subrange = [self.range_thresh[index_test][0],
+                        self.range_thresh[index_test][1]]
+            if self.verbose:
+                print 'i, subrange =', i, subrange
+            try:
+                cond[i] = np.logical_or(self.range[i] < subrange[0],
+                                        self.range[i] > subrange[1])
+            except ValueError:
+                warn('Likely range_thresh is messed up')
+                print 'debug subrange, range', subrange, self.range
         self.range_mask = cond.astype(bool)
 
     def fix_rng_thresh(self, rng_thresh):
@@ -633,9 +659,10 @@ class BeamBlockMultiVolume(BlockStats):
             for i in xrange(len(self.file_list)):
                 sndlist.append(sounding)
         else:
-            if len(sounding) != len(file_list):
+            if len(sounding) != len(self.file_list):
+                warn('sounding list not same length as file_list')
                 sndlist = []
-                for i in xrange(len(file_list)):
+                for i in xrange(len(self.file_list)):
                     sndlist.append(sounding[0])
             else:
                 sndlist = sounding
@@ -804,10 +831,10 @@ class KdpMethodAnalysis(BlockStats, MaskHelper):
             warn('Arguments must be same size, fix and try again')
             return
         for i, azimuth in enumerate(azimuths):
-            if var.upper() == 'DR' or var.upper() == 'ZDR' or var.upper() == 'ZD':
+            if var.upper() in ['DR', 'ZDR', 'ZD']:
                 self.zdr_adjustments.suggested_corrections = \
-                self._correct(self.zdr_adjustments.suggested_corrections, method,
-                              offsets[i], azimuth)
+                    self._correct(self.zdr_adjustments.suggested_corrections,
+                                  method, offsets[i], azimuth)
             else:
                 self.zh_adjustments.suggested_corrections = \
                 self._correct(self.zh_adjustments.suggested_corrections, method,
@@ -821,10 +848,6 @@ class KdpMethodAnalysis(BlockStats, MaskHelper):
         except KeyError:
             warn('Bad method used, not adjusting: '+method)
         return adjust
-
-    #Check ZDR corrections against IDL version & SelfConsistentAnalysis
-    #Test w/ previously det. statistics from IDL programs - interface class?
-    #Manually add/correct "bias" in Zdr vs. Azimuth
 
 #####################################
 
