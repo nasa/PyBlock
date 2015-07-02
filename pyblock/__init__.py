@@ -1,6 +1,6 @@
-#=============================
+# =============================
 """
-PyBlock - Python Package for beam blockage correction 
+PyBlock - Python Package for beam blockage correction
 ==================================
 Top-level package (:mod:'pyblock')
 ==================================
