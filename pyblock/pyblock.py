@@ -1,6 +1,6 @@
 """
-Python Polarimetric Radar Beam Blockage Calculation
-PyBlock v1.2
+Python Polarimetric Radar Beam Blockage Calculation (PyBlock)
+PyBlock v1.3
 
 
 Author
@@ -30,6 +30,7 @@ program expects and how you might change those parameters.
 
 Last Updated
 ------------
+v1.3 - 08/07/2015
 v1.2 - 07/02/2015
 v1.1 - 04/29/2015
 v1.0 - 04/08/2015
@@ -48,11 +49,14 @@ Lang, T. J., S. W. Nesbitt, and L. D. Carey, 2009: On the correction of
 Dependencies
 ------------
 numpy, pyart, csu_radartools, dualpol, warnings, os, __future__, matplotlib,
-statsmodels, gzip, pickle
+statsmodels, gzip, pickle, six
 
 
 Change Log
 ----------
+v1.3 Major Changes (08/07/2015):
+1. Made code Python 3 compliant.
+
 v1.2 Major Changes (07/02/2015):
 1. Made all code pep8 compliant.
 
@@ -75,6 +79,7 @@ v1.0 Functionality (04/08/2015)
 
 """
 from __future__ import division
+from __future__ import print_function
 import numpy as np
 import matplotlib.pyplot as plt
 from warnings import warn
@@ -85,8 +90,9 @@ import pickle
 import pyart
 import dualpol
 from csu_radartools import csu_misc
+import six
 
-VERSION = '1.0'
+VERSION = '1.3'
 DATA_DIR = os.sep.join([os.path.dirname(__file__), 'data'])+'/'
 DEFAULT_SND = DATA_DIR + 'default_sounding.txt'
 RANGE_MULT = 1000.0  # m per km
@@ -210,13 +216,14 @@ class BeamBlockSingleVolume(object):
             except:
                 warn('Failure in reading or analyzing file, moving on ...')
                 self.Fail = True
-                print 'BeamBlockSingleVolume Read/Processing Fail =', self.Fail
+                print('BeamBlockSingleVolume Read/Processing Fail =',
+                      self.Fail)
 
     def main_loop(self, filename, kwargs):
         """Broken off into separate method to simplify code debugging"""
         radar = pyart.io.read(filename)
         if kwargs['debug']:
-            print 'debug radar keys', radar.fields.keys()
+            print('debug radar keys', radar.fields.keys())
         self.sweep = kwargs['sweep']
         self.maxZ = np.int32(kwargs['maxZ'])
         self.rain_total_pts = 0
@@ -262,7 +269,7 @@ class BeamBlockSingleVolume(object):
         cond = self.azimuth_indices == self.nbins
         self.azimuth_indices[cond] = 0
         if self.verbose:
-            print 'azimuth_indices =', self.azimuth_indices[0]
+            print('azimuth_indices =', self.azimuth_indices[0])
 
     def get_range_mask(self, rng_thresh):
         """
@@ -275,18 +282,18 @@ class BeamBlockSingleVolume(object):
         else:
             self.range_thresh = rng_thresh
         cond = 0 * self.range
-        for i in xrange(np.shape(self.range)[0]):
+        for i in np.arange(np.shape(self.range)[0]):
             index_test = self.azimuth_indices[i][0]
             subrange = [self.range_thresh[index_test][0],
                         self.range_thresh[index_test][1]]
             if self.verbose:
-                print 'i, subrange =', i, subrange
+                print('i, subrange =', i, subrange)
             try:
                 cond[i] = np.logical_or(self.range[i] < subrange[0],
                                         self.range[i] > subrange[1])
             except ValueError:
                 warn('Likely range_thresh is messed up')
-                print 'debug subrange, range', subrange, self.range
+                print('debug subrange, range', subrange, self.range)
         self.range_mask = cond.astype(bool)
 
     def fix_rng_thresh(self, rng_thresh):
@@ -296,7 +303,7 @@ class BeamBlockSingleVolume(object):
         the range mask.
         """
         dummy = []
-        for i in xrange(self.nbins):
+        for i in np.arange(self.nbins):
             dummy.append(rng_thresh)
         self.range_thresh = dummy
 
@@ -343,7 +350,7 @@ class BeamBlockSingleVolume(object):
         dzvals = self.dz[self.rain_good_mask]
         self.rain_total_pts += len(dzvals)
         self.rain_binned_dz = []
-        for i in xrange(self.nbins):
+        for i in np.arange(self.nbins):
             self.rain_binned_dz.append(dzvals[indices == i])
 
     def group_drizzle_data(self):
@@ -352,7 +359,7 @@ class BeamBlockSingleVolume(object):
         drvals = self.dr[self.drizzle_good_mask]
         self.drizz_total_pts += len(drvals)
         self.drizzle_binned_dr = []
-        for i in xrange(self.nbins):
+        for i in np.arange(self.nbins):
             self.drizzle_binned_dr.append(drvals[indices == i])
 
     def group_fsc_data(self):
@@ -365,7 +372,7 @@ class BeamBlockSingleVolume(object):
         self.fsc_binned_data['DZ'] = []
         self.fsc_binned_data['DR'] = []
         self.fsc_binned_data['KD'] = []
-        for i in xrange(self.nbins):
+        for i in np.arange(self.nbins):
             self.fsc_binned_data['DZ'].append(dzvals[indices == i])
             self.fsc_binned_data['DR'].append(drvals[indices == i])
             self.fsc_binned_data['KD'].append(kdvals[indices == i])
@@ -455,7 +462,7 @@ class BlockStats(object):
         two-panel plot.
         """
         var = getattr(self, var)
-        for j in xrange(len(self.Azimuth)):
+        for j in np.arange(len(self.Azimuth)):
             ax.plot([self.Azimuth[j], self.Azimuth[j]],
                     [var['low'][j], var['high'][j]], 'k-')
             ax.plot([self.Azimuth[j]], [var['median'][j]], 'bD', ms=3, mew=0)
@@ -507,7 +514,7 @@ class BeamBlockMultiVolume(BlockStats):
         self.stats_name = stats_name
         # If just provided a stats file, ingest it and make a plot.
         if self.stats_flag:
-            print 'Read stats file, making a plot'
+            print('Read stats file, making a plot')
             self.make_plots()
         # If provided list of radar volume filenames, start processing!
         else:
@@ -523,9 +530,9 @@ class BeamBlockMultiVolume(BlockStats):
         both as raw data and as statistics, as well as plotted up.
         """
         for i, filen in enumerate(self.file_list):
-            print 'i=', i, 'of', len(self.file_list)-1
-            print 'radar file:', os.path.basename(filen), '& sounding:',\
-                  os.path.basename(self.sounding_list[i])
+            print('i=', i, 'of', len(self.file_list)-1)
+            print('radar file:', os.path.basename(filen), '& sounding:',
+                  os.path.basename(self.sounding_list[i]))
             self.kwargs['sounding'] = self.sounding_list[i]
             bb = BeamBlockSingleVolume(filen, **self.kwargs)
             if not hasattr(bb, 'Fail'):  # This avoids crashing on a bum file
@@ -535,10 +542,10 @@ class BeamBlockMultiVolume(BlockStats):
                 # Keep track of total points from each file
                 self.rain_total_pts += bb.rain_total_pts
                 self.drizz_total_pts += bb.drizz_total_pts
-                print 'Total KDP method points - rain, drizzle:', \
-                    self.rain_total_pts, self.drizz_total_pts
+                print('Total KDP method points - rain, drizzle:',
+                      self.rain_total_pts, self.drizz_total_pts)
                 # Populate dicts
-                for j in xrange(len(self.Azimuth)):
+                for j in np.arange(len(self.Azimuth)):
                     if len(bb.rain_binned_dz[j]) > 0:
                         self.rain_refl[np.str(j)] = \
                             np.append(self.rain_refl[np.str(j)],
@@ -559,16 +566,16 @@ class BeamBlockMultiVolume(BlockStats):
                                       bb.fsc_binned_data['KD'][j])
                 # Periodic saving/plotting of data & statistics
                 if i % 10 == 0 or i == len(self.file_list)-1:
-                    print 'Saving statistics to file and plotting an image'
+                    print('Saving statistics to file and plotting an image')
                     self.get_statistics()
                     self.make_plots()
                     self.write_stats()
                 if i % self.kwargs['output'] == 0 or \
                         i == len(self.file_list)-1:
                     if i != 0:  # Don't bother saving data if we just started
-                        print 'Writing raw data to file'
+                        print('Writing raw data to file')
                         store = RawDataStorage(obj=self, filename=self.save)
-            print
+            print('')
 
     def initialize_data_lists(self, bb):
         """
@@ -619,7 +626,7 @@ class BeamBlockMultiVolume(BlockStats):
         for key in STATS_KEYS:
             self.rain_stats[key] = np.zeros(length)
             self.drizzle_stats[key] = np.zeros(length)
-        for j in xrange(length):
+        for j in np.arange(length):
             self.rain_stats['N'][j], self.rain_stats['low'][j], \
                 self.rain_stats['median'][j], self.rain_stats['high'][j] = \
                 calc_median_ci(self.rain_refl[np.str(j)])
@@ -637,7 +644,7 @@ class BeamBlockMultiVolume(BlockStats):
                '#Samples(Drizz),CI_LO(Drizz),Median(Drizz),CI_HI(Drizz)'
         fileobj.write(wstr+'\n')
         fileobj.write('------------------------------------------------------')
-        for j in xrange(len(self.Azimuth)):
+        for j in np.arange(len(self.Azimuth)):
             wstr = '\n' + str(self.Azimuth[j]) + ',' + \
                 str(self.rain_stats['N'][j]) + ',' + \
                 str(self.rain_stats['low'][j]) + ',' + \
@@ -656,7 +663,7 @@ class BeamBlockMultiVolume(BlockStats):
         a single basestring (i.e., one file)
         """
         self.stats_flag = False
-        if isinstance(files, basestring):
+        if isinstance(files, six.string_types):
             try:
                 self.load_stats(files)
                 self.stats_flag = True
@@ -671,15 +678,15 @@ class BeamBlockMultiVolume(BlockStats):
         file names to program. Limited error checking is done.
         """
         sounding = self.kwargs['sounding']
-        if isinstance(sounding, basestring):
+        if isinstance(sounding, six.string_types):
             sndlist = []
-            for i in xrange(len(self.file_list)):
+            for i in np.arange(len(self.file_list)):
                 sndlist.append(sounding)
         else:
             if len(sounding) != len(self.file_list):
                 warn('sounding list not same length as file_list')
                 sndlist = []
-                for i in xrange(len(self.file_list)):
+                for i in np.arange(len(self.file_list)):
                     sndlist.append(sounding[0])
             else:
                 sndlist = sounding
@@ -695,7 +702,7 @@ class BeamBlockMultiVolume(BlockStats):
         self.fsc_data['DR'] = {}
         self.fsc_data['KD'] = {}
         self.Azimuth = np.zeros(bb.nbins)
-        for j in xrange(len(self.Azimuth)):
+        for j in np.arange(len(self.Azimuth)):
             self.rain_refl[np.str(j)] = []
             self.drizz_zdr[np.str(j)] = []
             self.fsc_data['DZ'][np.str(j)] = []
@@ -1027,8 +1034,8 @@ class SelfConsistentAnalysis(MaskHelper):
             self.I1[key] = np.dot(self.expected_kdp[key],
                                   DEFAULT_DELZ*self.number_of_obs[key])
             self._match_I2(i, key, kdp_analysis=kdp_analysis)
-        print 'Zh adjustments determined & stored as zh_adjustments attribute'
-        print 'ZDR offsets stored as zdr_offsets attribute'
+        print('Zh adjustments determined & stored as zh_adjustments')
+        print('ZDR offsets stored as zdr_offsets attribute')
 
     def print_out_data(self, filename='suggested_fsc_corrections.txt'):
         self.printout = PrintBlock(self, filename=filename, kdp_flag=False)
@@ -1137,8 +1144,8 @@ class SelfConsistentAnalysis(MaskHelper):
         """Loop thru all possible reflectivity offsets up to delk*kmax"""
         self._get_zdr_offset(ii, key, kdp_analysis)
         itest = np.zeros(self.kmax)
-        for i in xrange(len(self.zh_range)):
-            for k in xrange(self.kmax):
+        for i in np.arange(len(self.zh_range)):
+            for k in np.arange(self.kmax):
                 dztest = k * self.delk + self.zh_range + 0.5
                 expon = dztest[i] / self.b - self.a / self.b - self.c * \
                     (self.expected_zdr[key][i] + self.zdr_offsets[key]) / \
@@ -1147,7 +1154,7 @@ class SelfConsistentAnalysis(MaskHelper):
                     10.0**expon
         diff = np.abs(self.I1[key] - itest)
         kmin = np.argmin(diff)
-        # print key, self.I1[key], itest[kmin], diff[kmin], self.delk*kmin
+        # print(key, self.I1[key], itest[kmin], diff[kmin], self.delk*kmin)
         self.I2[key] = itest[kmin]
         self.zh_adjustments[key] = self.delk * kmin
 
@@ -1268,10 +1275,10 @@ class Corrections(object):
                         self.suggested_corrections[key]) > MAX_CORRECTION
                     self.suggested_corrections[key][mask] = BAD
             if verbose:
-                print az, ["%.2f" % np.round(
+                print(az, ["%.2f" % np.round(
                     self.suggested_corrections[key][i],
                     decimals=2) for key in self.suggested_corrections.keys()
-                    if not key == 'azimuth']
+                    if not key == 'azimuth'])
 
     def _check_var(self, kdp_analysis, zh_flag, verbose):
         """Choose the right variables to consider depending on zh_flag"""
@@ -1321,10 +1328,10 @@ class PrintBlock(object):
         wstr = 'Azimuth, ZH(std), ZH(strict), ZH(loose), ' + \
             'Azimuth, DR(std), DR(strict), DR(loose)'
         fileobj.write(wstr+'\n')
-        print wstr
+        print(wstr)
         wstr = '--------------------------------------------------------'
         fileobj.write(wstr+'\n')
-        print wstr
+        print(wstr)
         for i, az in enumerate(shortZH['azimuth']):
             wstr = str(az) + ',' + str(shortZH['standard'][i]) + ',' + \
                    str(shortZH['strict'][i]) + ',' + str(shortZH['loose'][i]) \
@@ -1332,10 +1339,10 @@ class PrintBlock(object):
                    str(shortDR['standard'][i]) + ',' + \
                    str(shortDR['strict'][i]) + ',' + str(shortDR['loose'][i])
             fileobj.write(wstr+'\n')
-            print wstr
+            print(wstr)
         fileobj.close()
-        print
-        print 'Data also written to', filename
+        print('')
+        print('Data also written to', filename)
 
     def print_fsc_data(self, obj, filename):
         """
@@ -1345,20 +1352,20 @@ class PrintBlock(object):
         fileobj = open(filename, 'w')
         wstr = 'Azimuth, I1, I2, ZH(fsc), DR(fsc)'
         fileobj.write(wstr+'\n')
-        print wstr
+        print(wstr)
         wstr = '--------------------------------------------------------'
         fileobj.write(wstr+'\n')
-        print wstr
+        print(wstr)
         for i, index in enumerate(obj.blocked_azimuth_indices):
             key = str(index)
             wstr = str(obj.blocked_azimuths[i]) + ',' + \
                 str(obj.I1[key]) + ',' + str(obj.I2[key]) + ',' + \
                 str(obj.zh_adjustments[key]) + ',' + str(obj.zdr_offsets[key])
             fileobj.write(wstr+'\n')
-            print wstr
+            print(wstr)
         fileobj.close()
-        print
-        print 'Data also written to', filename
+        print('')
+        print('Data also written to', filename)
 
 #####################################
 
