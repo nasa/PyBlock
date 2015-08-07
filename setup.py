@@ -4,14 +4,13 @@ PyBlock
 
 import os
 import sys
-
 from setuptools import setup, find_packages
 from distutils.sysconfig import get_python_lib
 
 # - Pull the header into a variable
 doclines = __doc__.split("\n")
 
-VERSION = '1.2'
+VERSION = '1.3'
 
 DATADIR = os.sep.join([os.path.dirname(__file__), 'data'])
 
