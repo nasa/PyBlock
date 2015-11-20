@@ -838,8 +838,18 @@ class KdpMethodAnalysis(BlockStats, MaskHelper):
         self.printout = PrintBlock(self, filename=filename, kdp_flag=True)
 
     def plot_corrections(self, save='kdp_corrections.png', return_flag=False,
-                         method='standard'):
-        plot = _PlotBlock(self, save=save, method=method)
+                         method='standard', zh_range=[0, 35],
+                         zdr_range=[-5, 5]):
+        """
+        method = Only relevant to KdpMethodAnalysis plots, can be either
+                 'standard', 'strict', or 'loose'
+        save = Full path and filename to save image file to
+        zdr_range = Range of ZDR corrections displayed
+        zh_range = Range of ZH corrections displayed
+        return_flag = Set to True to return figure and axes objects
+        """
+        plot = _PlotBlock(self, save=save, method=method, zh_range=zh_range,
+                          zdr_range=zdr_range)
         if return_flag:
             return plot.fig, plot.ax1, plot.ax2
 
@@ -1040,8 +1050,16 @@ class SelfConsistentAnalysis(MaskHelper):
     def print_out_data(self, filename='suggested_fsc_corrections.txt'):
         self.printout = PrintBlock(self, filename=filename, kdp_flag=False)
 
-    def plot_corrections(self, save='fsc_corrections.png', return_flag=False):
-        plot = _PlotBlock(self, save=save)
+    def plot_corrections(self, save='fsc_corrections.png', return_flag=False,
+                         zdr_range=[-5, 5], zh_range=[0, 35]):
+        """
+        save = Full path and filename to save image file to
+        zdr_range = Range of ZDR corrections displayed
+        zh_range = Range of ZH corrections displayed
+        return_flag = Set to True to return figure and axes objects
+        """
+        plot = _PlotBlock(self, save=save, zdr_range=zdr_range,
+                          zh_range=zh_range)
         if return_flag:
             return plot.fig, plot.ax1, plot.ax2
 
@@ -1377,14 +1395,19 @@ class _PlotBlock(object):
     from the KdpMethodAnalysis and SelfConsistentAnalysis classes.
     """
 
-    def __init__(self, obj, method='standard', save='corrections.png'):
+    def __init__(self, obj, method='standard', save='corrections.png',
+                 zh_range=[0, 35], zdr_range=[-5, 5]):
         """
         obj = KdpMethodAnalysis or SelfConsistentAnalysis object
         method = Only relevant to KdpMethodAnalysis plots, can be either
                  'standard', 'strict', or 'loose'
         save = Full path and filename to save image file to
+        zdr_range = Range of ZDR corrections displayed
+        zh_range = Range of ZH corrections displayed
         """
         self.object = obj
+        self.zh_range = zh_range
+        self.zdr_range = zdr_range
         if hasattr(obj, 'zdr_adjustments'):
             self._translate_kdp_data(method)
         elif hasattr(obj, 'I1'):
@@ -1400,7 +1423,7 @@ class _PlotBlock(object):
         self.ax1 = self.fig.add_subplot(211)
         self.ax1.plot(self.azimuths_zh, self.zh, 'kD', ms=3, label=self.label)
         plt.xlim(0, 360)
-        plt.ylim(0, 35)
+        plt.ylim(self.zh_range)
         plt.xlabel('Azimuth (deg)')
         plt.ylabel('Suggested Zh Correction (dBZ)')
         plt.legend(numpoints=1, loc='upper left')
@@ -1411,7 +1434,7 @@ class _PlotBlock(object):
                       ms=3, label=self.label)
         self.ax2.plot([0, 360], [0, 0], 'k--')
         plt.xlim(0, 360)
-        plt.ylim(-5, 5)
+        plt.ylim(self.zdr_range)
         plt.xlabel('Azimuth (deg)')
         plt.ylabel('Suggested Zdr Correction (dB)')
         plt.legend(numpoints=1, loc='upper left')
