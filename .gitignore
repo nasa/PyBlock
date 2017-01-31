@@ -1,6 +1,7 @@
 *.pyc
 build
 notebooks/.ipynb_checkpoints
+notebooks/Test_Linalg.ipynb
 notebooks/*.html
 notebooks/*.png
 pyblock/old
