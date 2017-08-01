@@ -10,7 +10,7 @@ from distutils.sysconfig import get_python_lib
 # - Pull the header into a variable
 doclines = __doc__.split("\n")
 
-VERSION = '1.3'
+VERSION = '1.4'
 
 DATADIR = os.sep.join([os.path.dirname(__file__), 'data'])
 

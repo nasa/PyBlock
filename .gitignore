@@ -2,6 +2,7 @@
 build
 notebooks/.ipynb_checkpoints
 notebooks/Test_Linalg.ipynb
+notebooks/PyBlock_Demo_Develop.ipynb
 notebooks/*.html
 notebooks/*.png
 pyblock/old
