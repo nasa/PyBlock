@@ -1,6 +1,6 @@
 """
 Python Polarimetric Radar Beam Blockage Calculation (PyBlock)
-PyBlock v1.3
+PyBlock v1.4
 
 
 Author
@@ -30,6 +30,7 @@ program expects and how you might change those parameters.
 
 Last Updated
 ------------
+v1.4 - 08/01/2017
 v1.3 - 08/07/2015
 v1.2 - 07/02/2015
 v1.1 - 04/29/2015
@@ -49,11 +50,17 @@ Lang, T. J., S. W. Nesbitt, and L. D. Carey, 2009: On the correction of
 Dependencies
 ------------
 numpy, pyart, csu_radartools, dualpol, warnings, os, __future__, matplotlib,
-statsmodels, gzip, pickle, six
+statsmodels, six, h5py
 
 
 Change Log
 ----------
+v1.4 Major Changes (08/01/2017):
+1. Removed gzip and pickle dependencies, and added h5py dependency.
+2. Due to security risk associated with pickle module, changed the temporary
+   block data file to HDF5 format. This revised the RawDataStorage class.
+3. Some dcoumentation improvements.
+
 v1.3 Major Changes (08/07/2015):
 1. Made code Python 3 compliant.
 
@@ -85,14 +92,13 @@ import matplotlib.pyplot as plt
 from warnings import warn
 import statsmodels.api as sm
 import os
-import gzip
-import pickle
 import pyart
 import dualpol
 from csu_radartools import csu_misc
 import six
+import h5py
 
-VERSION = '1.3'
+VERSION = '1.4'
 DATA_DIR = os.sep.join([os.path.dirname(__file__), 'data'])+'/'
 DEFAULT_SND = DATA_DIR + 'default_sounding.txt'
 RANGE_MULT = 1000.0  # m per km
@@ -126,7 +132,7 @@ DEFAULT_KW = {'sweep': 0, 'dz': 'ZH', 'dr': 'DR', 'dp': 'DP', 'rh': 'RH',
               'drizzle_kdp_thresh': DEFAULT_DRIZZ, 'rng_thresh': DEFAULT_RANGE,
               'dsd_flag': False, 'output': 100, 'rain_dz_thresh': 39,
               'liquid_ice_flag': False, 'precip_flag': False,
-              'maxZ': DEFAULT_ZMAX, 'debug': False}
+              'maxZ': DEFAULT_ZMAX, 'debug': False, 'gzip': True}
 
 kwargs = np.copy(DEFAULT_KW)
 
@@ -176,6 +182,7 @@ liquid_ice_flag = Set to True to also retrieve liquid/ice mass via DualPol
 precip_flag = Set to True to also retrieve rainfall rate via DualPol
 maxZ = Integer, highest Z value to consider in FSC meth. (to avoid ice contam.)
 debug = Set to True to check the BeamBlockSingleVolume processing loop
+gzip = Set to True to keep temporary block data HDF5 file gzipped
 """
 
 #####################################
@@ -574,7 +581,8 @@ class BeamBlockMultiVolume(BlockStats):
                         i == len(self.file_list)-1:
                     if i != 0:  # Don't bother saving data if we just started
                         print('Writing raw data to file')
-                        store = RawDataStorage(obj=self, filename=self.save)
+                        store = RawDataStorage(obj=self, filename=self.save,
+                                               gzip=self.kwargs['gzip'])
             print('')
 
     def initialize_data_lists(self, bb):
@@ -594,7 +602,8 @@ class BeamBlockMultiVolume(BlockStats):
         """
         if self.save is not None:
             try:
-                store = RawDataStorage(filename=self.save)
+                store = RawDataStorage(filename=self.save,
+                                       gzip=self.kwargs['gzip'])
                 self.Azimuth = store.Azimuth
                 self.rain_refl = store.rain_refl
                 self.drizz_zdr = store.drizz_zdr
@@ -717,50 +726,132 @@ class RawDataStorage(object):
 
     """
     Class that facilitates saving and loading of azimuth-binned reflectivity
-    and differential reflectivity data. Uses pickle module & stores the saved
-    object as a binary file.
+    and differential reflectivity data. Uses h5py module & stores the saved
+    object as an HDF5 file.
+
+    Attributes
+    ----------
+    Azimuth : float ndarray
+        Array of azimuths being analyzed (deg)
+    fsc_data : dict
+        Dictionary of dictionaries for all saved rainfall data for
+        reflectivity, differential reflectivity, and specific differential
+        phase. Valid at each azimuth bin.
+    rain_refl : dict
+        Dictionary of valid rain reflectivity values at each azimuth bin
+    drizz_zdr : dict
+        Dictionary of valid drizzle differential reflectivity values at each
+        azimuth bin
     """
 
-    def __init__(self, obj=None, filename=None):
+    def __init__(self, obj=None, filename=None, gzip=True):
         """
         Determine what was just passed to class.
+
+        Other Parameters
+        ----------------
+        obj : NoneType or pyblock.BeamBlockMultiVolume
+            If None, will load data from the filename, otherwise will save
+            key BeamBlockMultiVolume data to file.
+        filename : NoneType or str
+            Full path and name of file that host or will host the
+            BeamBlockMultiVolume data. If None, then will load from or save to
+            default filename.
+        gzip : bool
+            True - Save file will be gzipped, removing previous gzipped file if
+                   it exists. If loading data instead, then this tells program
+                   to uncompress the stored data.
+
+            False - Save file will not be compressed, or load file was not
+                    compressed.
+
         """
         if obj is not None:
             if hasattr(obj, 'kwargs'):
-                self.save_raw_data(obj, filename)
+                self.save_raw_data(obj, filename, gzip)
             else:
                 warn('Not sure was passed proper BeamBlockMultiVolume object')
         else:
-            self.load_raw_data(filename)
+            self.load_raw_data(filename, gzip)
 
-    def save_raw_data(self, obj, filename):
+    def save_raw_data(self, obj, filename, gzip):
         """
-        Saves data to pickled file.
+        Saves data to HDF5 file.
+
+        Parameters
+        ----------
+        obj : pyblock.BeamBlockMultiVolume
+            BeamBlockMultiVolume object to save to file
+        filename : str
+            Path and name of file to save data too. If this file exists it will
+            be removed first.
+        gzip : bool
+            True - Save file will be gzipped, removing previous gzipped file if
+                   it exists.
+
+            False - Save file will not be compressed.
+
         """
-        self.populate_attributes(obj)
         if filename is None:
-            filename = './temporary_block_data.dat'
-        with gzip.open(filename+'.gz', 'wb') as f:
-            pickle.dump(self, f)
+            filename = './temporary_block_data.h5'
+        os.system('rm ' + filename)
+        h = h5py.File(filename)
+        v = getattr(obj, 'Azimuth')
+        h.create_dataset('Azimuth', data=np.array(v), dtype=np.array(v).dtype)
+        for var in ['rain_refl', 'drizz_zdr']:
+            for k, v in getattr(obj, var).items():
+                h.create_dataset(var + '_' + k, data=np.array(v), dtype=float)
+        for var in ['DZ', 'DR', 'KD']:
+            for k, v in obj.fsc_data[var].items():
+                h.create_dataset('fsc_data_' + var.lower() + k,
+                                 data=np.array(v), dtype=float)
+        h.close()
+        if gzip:
+            os.system('rm ' + filename + '.gz')
+            os.system('gzip ' + filename)
 
-    def load_raw_data(self, filename):
+    def load_raw_data(self, filename, gzip):
         """
-        Loads data from pickled file.
+        Loads data from HDF5 file.
+
+        Parameters
+        ----------
+        filename : str
+            Full path and name of file that hosts BeamBlockMultiVolume data.
+        gzip : bool
+            True - File to be loaded is gzipped.
+
+            False - File to be loaded is not gzipped
+
         """
         if filename is None:
-            filename = './temporary_block_data.dat'
-        with gzip.open(filename+'.gz', 'rb') as f:
-            loadobj = pickle.load(f)
-        self.populate_attributes(loadobj)
-
-    def populate_attributes(self, obj):
-        """
-        Only certain attributes are actually saved.
-        """
-        self.rain_refl = obj.rain_refl
-        self.drizz_zdr = obj.drizz_zdr
-        self.Azimuth = obj.Azimuth
-        self.fsc_data = obj.fsc_data
+            filename = './temporary_block_data.h5'
+        if gzip:
+            os.system('gzip -d ' + filename + '.gz')
+        h = h5py.File(filename, 'r')
+        self.Azimuth = np.array(h['Azimuth'])
+        for var in ['rain_refl', 'drizz_zdr']:
+            v = {}
+            cnt = 0
+            for key in h.keys():
+                if str(key)[:9] == var:
+                    cnt += 1
+            for i in range(cnt):
+                v[str(i)] = np.array(h[var + '_' + str(i)])
+            setattr(self, var, v)
+        self.fsc_data = {}
+        for var in ['DZ', 'KD', 'DR']:
+            cnt = 0
+            self.fsc_data[var] = {}
+            for key in h.keys():
+                if str(key)[:11] == 'fsc_data_' + var.lower():
+                    cnt += 1
+            for i in range(cnt):
+                self.fsc_data[var][str(i)] = np.array(
+                    h['fsc_data_' + var.lower() + str(i)])
+        h.close()
+        if gzip:
+            os.system('gzip  ' + filename)
 
 #####################################
 
@@ -925,7 +1016,12 @@ class SelfConsistentAnalysis(MaskHelper):
                    to consider in the determination of the rainfall
                    self-consistency relationship between Z, Zdr, and Kdp.
         """
-        data = RawDataStorage(filename=filename)
+        if filename[-3:] == '.gz':
+            gzip = True
+            filename = filename[:-3]
+        else:
+            gzip = False
+        data = RawDataStorage(filename=filename, gzip=gzip)
         self.fsc_data = data.fsc_data
         self.Azimuth = data.Azimuth
         self.get_azimuth_mask(azimuths)

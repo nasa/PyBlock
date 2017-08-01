@@ -6,7 +6,8 @@ PyBlock Installation
 -------------------
 The following dependencies need to be installed first:
 
-- A robust version of Python 2.7 or 3.4 (other versions untested) w/ most standard scientific packages (e.g., numpy, matplotlib, pandas, etc.) - Get one for free [here.](https://store.continuum.io/cshop/anaconda/)
+- A robust version of Python 2.7 or 3.4-3.6 (other versions untested) w/ most standard scientific packages (e.g., numpy, matplotlib, pandas, etc.) - Get one for free [here.](https://store.continuum.io/cshop/anaconda/)
+- The `h5py` module (available via most package managers; e.g., conda)
 - [The Python Atmospheric Radiation Measurement (ARM) Radar Toolkit (Py-ART)] (https://github.com/ARM-DOE/pyart)
 - [CSU_RadarTools](https://github.com/CSU-Radarmet/CSU_RadarTools)
 - [SkewT](https://pypi.python.org/pypi/SkewT) - Python 3 version can be found [here.](https://github.com/tjlang/SkewT)
@@ -22,8 +23,7 @@ import matplotlib.pyplot as plt
 from warnings import warn
 import statsmodels.api as sm
 import os
-import gzip
-import pickle
+import h5py
 import pyart
 import dualpol
 from csu_radartools import csu_misc
